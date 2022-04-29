@@ -109,7 +109,9 @@ responseValidator mkErrorJson apiDef app req sendResponse = app req $ \res -> do
             putStrLn $ ">>> Status: " ++ show statusCode'
 
             case mBodySchema of
-                Nothing         -> sendResponse res
+                Nothing         ->
+                    error "unrecognized path"
+                    -- sendResponse res
                 Just bodySchema -> do
                     body <- getResponseBody res
                     putStrLn $ ">>> Body': " ++ show body

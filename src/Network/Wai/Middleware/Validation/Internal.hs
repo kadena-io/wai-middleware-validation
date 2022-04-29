@@ -77,6 +77,10 @@ makePathMap ps = M.fromList $ zip (map toTemplatedPath ps) ps
 lookupDefinedPath :: FilePath -> PathMap -> Maybe FilePath
 lookupDefinedPath realPath = M.lookup (toTemplatedPath realPath)
 
+data ValidatorConfiguration = ValidatorConfiguration
+    { configuredApiDefinition :: ApiDefinition
+    , configuredPathPrefix :: FilePath
+    }
 
 data ApiDefinition = ApiDefinition
     { getOpenApi :: OpenApi
