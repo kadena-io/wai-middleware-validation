@@ -90,8 +90,8 @@ requestValidator mkErrorJson vc app req sendResponse = do
 
             case validateJsonDocument (configuredApiDefinition vc) bodySchema body of
                 Right []   -> app newReq sendResponse
-                Right errs -> respondError $ unlines errs
-                Left err   -> respondError err
+                Right errs -> respondError $ unlines ("Request error:" : errs)
+                Left err   -> respondError $ "Request error:\n" <> err
   where
     respondError msg = sendResponse $
         responseLBS badRequest400 [(hContentType, "application/json")] $ encode $ mkErrorJson msg
@@ -116,8 +116,8 @@ responseValidator mkErrorJson vc app req sendResponse = app req $ \res -> do
             putStrLn $ ">>> Status: " ++ show statusCode'
 
             case mBodySchema of
-                Nothing         ->
-                    respondError "unrecognized path"
+                Nothing         -> do
+                    respondError $ "unrecognized path: " <> path
                     -- sendResponse res
                 Just bodySchema -> do
                     body <- getResponseBody res
@@ -127,8 +127,8 @@ responseValidator mkErrorJson vc app req sendResponse = app req $ \res -> do
                         Right []   -> sendResponse res
                         -- REVIEW: It may be better not to include the error details in the response.
                         -- _ -> respondError "Invalid response body"
-                        Right errs -> respondError $ unlines errs
-                        Left err   -> respondError err
+                        Right errs -> respondError $ unlines ("Response error:" : errs)
+                        Left err   -> respondError $ "Response error:\n" <> err
 
         else sendResponse res
   where
