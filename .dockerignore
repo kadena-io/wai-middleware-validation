@@ -1,5 +1,3 @@
 .git/
-.stack-work/
 docker/
 tmp/
-stack.yaml.lock

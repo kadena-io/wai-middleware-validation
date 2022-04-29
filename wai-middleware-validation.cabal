@@ -1,9 +1,10 @@
+cabal-version:       2.4
 name:                wai-middleware-validation
 version:             0.1.0.2
 synopsis:            WAI Middleware to validate the request and response bodies
 description:         wai-middleware-validation is a WAI Middleware that automates the validation of request and response bodies. It validates JSON format bodies according to the schema defined in the OpenAPI document.
 homepage:            https://iij-ii.github.io/wai-middleware-validation/
-license:             BSD3
+license:             BSD-3-Clause
 license-file:        LICENSE
 author:              Kenzo Yotsuya
 maintainer:          kyotsuya@iij-ii.co.jp
@@ -12,7 +13,6 @@ category:            Web
 build-type:          Simple
 extra-source-files:  README.md
                    , ChangeLog.md
-cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src

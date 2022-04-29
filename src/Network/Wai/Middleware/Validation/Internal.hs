@@ -2,21 +2,23 @@
 
 module Network.Wai.Middleware.Validation.Internal where
 
-import           Control.Lens                  (at, (^.), (^?), _Just)
-import           Data.Aeson                    (Value, decode)
-import qualified Data.ByteString.Lazy          as L
-import           Data.HashMap.Strict.InsOrd    (InsOrdHashMap, keys)
-import qualified Data.Map.Strict               as M
-import           Data.OpenApi                  (HttpStatusCode, OpenApi, Operation, PathItem,
-                                                Referenced, Schema, components, content, default_,
-                                                paths, requestBodies, requestBody, responses,
-                                                schema, schemas, validateJSON, _pathItemDelete,
-                                                _pathItemGet, _pathItemPatch, _pathItemPost,
-                                                _pathItemPut)
-import           Data.OpenApi.Schema.Generator (dereference)
-import qualified Data.Text                     as T
-import           Network.HTTP.Types            (StdMethod (DELETE, GET, PATCH, POST, PUT))
-import           System.FilePath               (splitDirectories)
+import Control.Lens
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as L
+import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
+import qualified Data.Map.Strict as M
+import Data.OpenApi
+  ( HttpStatusCode, OpenApi, Operation, PathItem
+  , Referenced, Schema, components, content, default_
+  , paths, requestBodies, requestBody, responses
+  , schema, schemas, validateJSON, _pathItemDelete
+  , _pathItemGet, _pathItemPatch, _pathItemPost
+  , _pathItemPut
+  )
+import Data.OpenApi.Schema.Generator (dereference)
+import qualified Data.Text as T
+import Network.HTTP.Types (StdMethod (DELETE, GET, PATCH, POST, PUT))
+import System.FilePath (splitDirectories)
 
 --
 -- For reverse look up of path
@@ -83,16 +85,21 @@ data ApiDefinition = ApiDefinition
 
 -- | Create ApiDefinition instance from API document.
 --
-toApiDefinition :: L.ByteString -> Maybe ApiDefinition
+toApiDefinition :: Aeson.Value -> Either String ApiDefinition
 toApiDefinition openApiJson = ApiDefinition <$> mOpenApi <*> mPathMap
   where
-    mOpenApi = decode openApiJson :: Maybe OpenApi
-    mKeys = keys <$> (mOpenApi ^? _Just . paths)
+    mOpenApi :: Either String OpenApi
+    mOpenApi = case Aeson.fromJSON openApiJson of
+      Aeson.Success s -> Right s
+      Aeson.Error e -> Left e
+
+    mKeys = keys <$> (mOpenApi ^? _Right . paths)
     mPathMap = case mKeys of
         -- OpenAPI Object must have `paths`
         -- https://swagger.io/specification/#openapi-object
-        Just [] -> Nothing
-        _       -> makePathMap <$> mKeys
+        Just [] -> Left "No paths in OpenAPI spec"
+        Nothing -> Left "No paths in OpenAPI spec"
+        Just keys -> Right $ makePathMap keys
 
 
 newtype BodySchema = BodySchema { toReferencedSchema :: Referenced Schema } deriving (Eq, Show)
@@ -154,7 +161,7 @@ getPathItem apiDef realPath = mPath >>= \definedPath -> openApi ^? paths . at de
 -- | Validate JSON document.
 --
 validateJsonDocument :: ApiDefinition -> BodySchema -> L.ByteString -> Either String [String]
-validateJsonDocument apiDef bodySchema dataJson = case decode dataJson :: Maybe Value of
+validateJsonDocument apiDef bodySchema dataJson = case Aeson.decode dataJson :: Maybe Aeson.Value of
     Nothing  -> Left "The document is not JSON."
     Just val -> case definitionsSchema' of
         Nothing -> Left "Schema objects are not defined in the OpenAPI document."

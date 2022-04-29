@@ -4,7 +4,7 @@
 
 module Network.Wai.Middleware.Validation where
 
-import           Data.Aeson                                 (ToJSON, encode, object, toJSON, (.=))
+import           Data.Aeson                                 (ToJSON, encode, object, toJSON, (.=), Value)
 import           Data.ByteString.Builder                    (toLazyByteString)
 import qualified Data.ByteString.Char8                      as S8
 import qualified Data.ByteString.Lazy                       as L
@@ -38,10 +38,10 @@ mkDefaultErrorJson = DefaultErrorJson "Validation failed"
 
 
 -- | Make a middleware for Request/Response validation.
-mkValidator' :: L.ByteString -> Maybe Middleware
+mkValidator' :: Value -> Either String Middleware
 mkValidator' = mkValidator mkDefaultErrorJson
 
-mkValidator :: ToJSON a => (String -> a) -> L.ByteString -> Maybe Middleware
+mkValidator :: ToJSON a => (String -> a) -> Value -> Either String Middleware
 mkValidator mkErrorJson apiJson = (.) <$> mResValidator <*> mReqValidator
   where
     mApiDef = toApiDefinition apiJson
@@ -49,17 +49,17 @@ mkValidator mkErrorJson apiJson = (.) <$> mResValidator <*> mReqValidator
     mResValidator = responseValidator mkErrorJson <$> mApiDef
 
 -- | Make a middleware for Requestion validation.
-mkRequestValidator' :: L.ByteString -> Maybe Middleware
+mkRequestValidator' :: Value -> Either String Middleware
 mkRequestValidator' = mkRequestValidator mkDefaultErrorJson
 
-mkRequestValidator :: ToJSON a => (String -> a) -> L.ByteString -> Maybe Middleware
+mkRequestValidator :: ToJSON a => (String -> a) -> Value -> Either String Middleware
 mkRequestValidator mkErrorJson apiJson = requestValidator mkErrorJson <$> toApiDefinition apiJson
 
 -- | Make a middleware for Response validation.
-mkResponseValidator' :: L.ByteString -> Maybe Middleware
+mkResponseValidator' :: Value -> Either String Middleware
 mkResponseValidator' = mkResponseValidator mkDefaultErrorJson
 
-mkResponseValidator :: ToJSON a => (String -> a) -> L.ByteString -> Maybe Middleware
+mkResponseValidator :: ToJSON a => (String -> a) -> Value -> Either String Middleware
 mkResponseValidator mkErrorJson apiJson = responseValidator mkErrorJson <$> toApiDefinition apiJson
 
 requestValidator :: ToJSON a => (String -> a) -> ApiDefinition -> Middleware
@@ -152,16 +152,16 @@ responseHeaders = [(hContentType, "application/json")]
 -- for non-middleware use
 --
 
-validateRequestBody :: StdMethod -> FilePath -> L.ByteString -> L.ByteString -> Either String [String]
+validateRequestBody :: StdMethod -> FilePath -> Value -> L.ByteString -> Either String [String]
 validateRequestBody method path apiJson body = case toApiDefinition apiJson of
-    Nothing     -> Left "Invalid OpenAPI document"
-    Just apiDef -> case getRequestBodySchema apiDef method path of
+    Left err -> Left err
+    Right apiDef -> case getRequestBodySchema apiDef method path of
         Nothing         -> Left "Schema not found"
         Just bodySchema -> validateJsonDocument apiDef bodySchema body
 
-validateResponseBody :: StdMethod -> FilePath -> Int -> L.ByteString -> L.ByteString -> Either String [String]
+validateResponseBody :: StdMethod -> FilePath -> Int -> Value -> L.ByteString -> Either String [String]
 validateResponseBody method path statusCode' apiJson body = case toApiDefinition apiJson of
-    Nothing     -> Left "Invalid OpenAPI document"
-    Just apiDef -> case getResponseBodySchema apiDef method path statusCode' of
+    Left err -> Left err
+    Right apiDef -> case getResponseBodySchema apiDef method path statusCode' of
         Nothing         -> Left "Schema not found"
         Just bodySchema -> validateJsonDocument apiDef bodySchema body
