@@ -117,7 +117,7 @@ responseValidator mkErrorJson vc app req sendResponse = app req $ \res -> do
 
             case mBodySchema of
                 Nothing         ->
-                    error "unrecognized path"
+                    respondError "unrecognized path"
                     -- sendResponse res
                 Just bodySchema -> do
                     body <- getResponseBody res
