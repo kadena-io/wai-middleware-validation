@@ -4,6 +4,7 @@ module Network.Wai.Middleware.Validation.Internal where
 
 import Control.Lens
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
 import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
 import qualified Data.Map.Strict as M
@@ -78,32 +79,17 @@ lookupDefinedPath :: FilePath -> PathMap -> Maybe FilePath
 lookupDefinedPath realPath = M.lookup (toTemplatedPath realPath)
 
 data ValidatorConfiguration = ValidatorConfiguration
-    { configuredApiDefinition :: ApiDefinition
-    , configuredPathPrefix :: FilePath
+    { configuredPathPrefix :: !BS.ByteString
+    , configuredApiDefinition :: !ApiDefinition
     }
 
 data ApiDefinition = ApiDefinition
-    { getOpenApi :: OpenApi
-    , getPathMap :: PathMap
+    { getOpenApi :: !OpenApi
+    , getPathMap :: !PathMap
     } deriving (Eq, Show)
 
 -- | Create ApiDefinition instance from API document.
 --
-toApiDefinition :: Aeson.Value -> Either String ApiDefinition
-toApiDefinition openApiJson = ApiDefinition <$> mOpenApi <*> mPathMap
-  where
-    mOpenApi :: Either String OpenApi
-    mOpenApi = case Aeson.fromJSON openApiJson of
-      Aeson.Success s -> Right s
-      Aeson.Error e -> Left e
-
-    mKeys = keys <$> (mOpenApi ^? _Right . paths)
-    mPathMap = case mKeys of
-        -- OpenAPI Object must have `paths`
-        -- https://swagger.io/specification/#openapi-object
-        Just [] -> Left "No paths in OpenAPI spec"
-        Nothing -> Left "No paths in OpenAPI spec"
-        Just keys -> Right $ makePathMap keys
 
 
 newtype BodySchema = BodySchema { toReferencedSchema :: Referenced Schema } deriving (Eq, Show)

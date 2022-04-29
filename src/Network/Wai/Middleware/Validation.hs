@@ -1,13 +1,16 @@
 {-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE ViewPatterns      #-}
 
 module Network.Wai.Middleware.Validation where
 
+import           Control.Lens hiding ((.=))
 import           Data.Aeson                                 (ToJSON, encode, object, toJSON, (.=), Value)
 import           Data.ByteString.Builder                    (toLazyByteString)
 import qualified Data.ByteString.Char8                      as S8
 import qualified Data.ByteString.Lazy                       as L
+import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
 import           Data.IORef                                 (atomicModifyIORef, newIORef, readIORef)
 import           Network.HTTP.Types                         (ResponseHeaders, StdMethod,
                                                              badRequest400, hContentType,
@@ -19,9 +22,8 @@ import           Network.Wai                                (Middleware, Request
                                                              responseStatus, responseToStream,
                                                              strictRequestBody)
 
-import           Network.Wai.Middleware.Validation.Internal (ApiDefinition, getRequestBodySchema,
-                                                             getResponseBodySchema, toApiDefinition,
-                                                             validateJsonDocument)
+import           Network.Wai.Middleware.Validation.Internal
+import           Data.OpenApi(OpenApi, paths)
 
 
 data DefaultErrorJson = DefaultErrorJson
@@ -36,39 +38,44 @@ instance ToJSON DefaultErrorJson where
 mkDefaultErrorJson :: String -> DefaultErrorJson
 mkDefaultErrorJson = DefaultErrorJson "Validation failed"
 
+toApiDefinition :: OpenApi -> ApiDefinition
+toApiDefinition openApi =
+  ApiDefinition openApi pathMap
+  where
+    pathMap = makePathMap (keys $ openApi ^. paths)
 
 -- | Make a middleware for Request/Response validation.
-mkValidator' :: Value -> Either String Middleware
+mkValidator' :: S8.ByteString -> OpenApi -> Middleware
 mkValidator' = mkValidator mkDefaultErrorJson
 
-mkValidator :: ToJSON a => (String -> a) -> Value -> Either String Middleware
-mkValidator mkErrorJson apiJson = (.) <$> mResValidator <*> mReqValidator
+mkValidator :: ToJSON a => (String -> a) -> S8.ByteString -> OpenApi -> Middleware
+mkValidator mkErrorJson pathPrefix openApi = mResValidator . mReqValidator
   where
-    mApiDef = toApiDefinition apiJson
-    mReqValidator = requestValidator mkErrorJson <$> mApiDef
-    mResValidator = responseValidator mkErrorJson <$> mApiDef
+    mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi)
+    mReqValidator = requestValidator mkErrorJson $ mValidatorConfig
+    mResValidator = responseValidator mkErrorJson $ mValidatorConfig
 
 -- | Make a middleware for Requestion validation.
-mkRequestValidator' :: Value -> Either String Middleware
+mkRequestValidator' :: ValidatorConfiguration -> Middleware
 mkRequestValidator' = mkRequestValidator mkDefaultErrorJson
 
-mkRequestValidator :: ToJSON a => (String -> a) -> Value -> Either String Middleware
-mkRequestValidator mkErrorJson apiJson = requestValidator mkErrorJson <$> toApiDefinition apiJson
+mkRequestValidator :: ToJSON a => (String -> a) -> ValidatorConfiguration -> Middleware
+mkRequestValidator mkErrorJson vc = requestValidator mkErrorJson vc
 
 -- | Make a middleware for Response validation.
-mkResponseValidator' :: Value -> Either String Middleware
+mkResponseValidator' :: ValidatorConfiguration -> Middleware
 mkResponseValidator' = mkResponseValidator mkDefaultErrorJson
 
-mkResponseValidator :: ToJSON a => (String -> a) -> Value -> Either String Middleware
-mkResponseValidator mkErrorJson apiJson = responseValidator mkErrorJson <$> toApiDefinition apiJson
+mkResponseValidator :: ToJSON a => (String -> a) -> ValidatorConfiguration -> Middleware
+mkResponseValidator mkErrorJson vc = responseValidator mkErrorJson vc
 
-requestValidator :: ToJSON a => (String -> a) -> ApiDefinition -> Middleware
-requestValidator mkErrorJson apiDef app req sendResponse = do
+requestValidator :: ToJSON a => (String -> a) -> ValidatorConfiguration -> Middleware
+requestValidator mkErrorJson vc app req sendResponse = do
     let
         eMethod = parseMethod $ requestMethod req
-        path = S8.unpack $ rawPathInfo req
+        Just path = S8.unpack <$> S8.stripPrefix (configuredPathPrefix vc) (rawPathInfo req)
         mBodySchema = case eMethod of
-            Right method -> getRequestBodySchema apiDef method path
+            Right method -> getRequestBodySchema (configuredApiDefinition vc) method path
             _            -> Nothing
 
     putStrLn ">>> [Request]"
@@ -81,7 +88,7 @@ requestValidator mkErrorJson apiDef app req sendResponse = do
             (body, newReq) <- getRequestBody req
             putStrLn $ ">>> Body: " ++ show body
 
-            case validateJsonDocument apiDef bodySchema body of
+            case validateJsonDocument (configuredApiDefinition vc) bodySchema body of
                 Right []   -> app newReq sendResponse
                 Right errs -> respondError $ unlines errs
                 Left err   -> respondError err
@@ -89,18 +96,18 @@ requestValidator mkErrorJson apiDef app req sendResponse = do
     respondError msg = sendResponse $
         responseLBS badRequest400 [(hContentType, "application/json")] $ encode $ mkErrorJson msg
 
-responseValidator :: ToJSON a => (String -> a) -> ApiDefinition -> Middleware
-responseValidator mkErrorJson apiDef app req sendResponse = app req $ \res -> do
+responseValidator :: ToJSON a => (String -> a) -> ValidatorConfiguration -> Middleware
+responseValidator mkErrorJson vc app req sendResponse = app req $ \res -> do
     let status = responseStatus res
     -- Validate only the success response.
     if statusIsSuccessful status
         then do
             let
                 eMethod = parseMethod $ requestMethod req
-                path = S8.unpack $ rawPathInfo req
+                Just path = S8.unpack <$> S8.stripPrefix (configuredPathPrefix vc) (rawPathInfo req)
                 statusCode' = statusCode status
                 mBodySchema = case eMethod of
-                    Right method -> getResponseBodySchema apiDef method path statusCode'
+                    Right method -> getResponseBodySchema (configuredApiDefinition vc) method path statusCode'
                     _            -> Nothing
 
             putStrLn ">>> [Response]"
@@ -116,7 +123,7 @@ responseValidator mkErrorJson apiDef app req sendResponse = app req $ \res -> do
                     body <- getResponseBody res
                     putStrLn $ ">>> Body': " ++ show body
 
-                    case validateJsonDocument apiDef bodySchema body of
+                    case validateJsonDocument (configuredApiDefinition vc) bodySchema body of
                         Right []   -> sendResponse res
                         -- REVIEW: It may be better not to include the error details in the response.
                         -- _ -> respondError "Invalid response body"
@@ -154,16 +161,14 @@ responseHeaders = [(hContentType, "application/json")]
 -- for non-middleware use
 --
 
-validateRequestBody :: StdMethod -> FilePath -> Value -> L.ByteString -> Either String [String]
-validateRequestBody method path apiJson body = case toApiDefinition apiJson of
-    Left err -> Left err
-    Right apiDef -> case getRequestBodySchema apiDef method path of
+validateRequestBody :: StdMethod -> FilePath -> OpenApi -> L.ByteString -> Either String [String]
+validateRequestBody method path (toApiDefinition -> apiDef) body =
+    case getRequestBodySchema apiDef method path of
         Nothing         -> Left "Schema not found"
         Just bodySchema -> validateJsonDocument apiDef bodySchema body
 
-validateResponseBody :: StdMethod -> FilePath -> Int -> Value -> L.ByteString -> Either String [String]
-validateResponseBody method path statusCode' apiJson body = case toApiDefinition apiJson of
-    Left err -> Left err
-    Right apiDef -> case getResponseBodySchema apiDef method path statusCode' of
+validateResponseBody :: StdMethod -> FilePath -> Int -> OpenApi -> L.ByteString -> Either String [String]
+validateResponseBody method path statusCode' (toApiDefinition -> apiDef) body =
+    case getResponseBodySchema apiDef method path statusCode' of
         Nothing         -> Left "Schema not found"
         Just bodySchema -> validateJsonDocument apiDef bodySchema body
