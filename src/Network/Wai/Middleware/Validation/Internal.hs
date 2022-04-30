@@ -5,9 +5,11 @@ module Network.Wai.Middleware.Validation.Internal where
 import Control.Lens
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
 import qualified Data.Map.Strict as M
+import Data.Maybe
 import Data.OpenApi
   ( HttpStatusCode, OpenApi, Operation, PathItem
   , Referenced, Schema, components, content, default_
@@ -17,8 +19,9 @@ import Data.OpenApi
   , _pathItemPut
   )
 import Data.OpenApi.Schema.Generator (dereference)
+import Data.String
 import qualified Data.Text as T
-import Network.HTTP.Types (StdMethod (DELETE, GET, PATCH, POST, PUT))
+import Network.HTTP.Types
 import System.FilePath (splitDirectories)
 
 --
@@ -118,16 +121,16 @@ getRequestBodyReferencedSchema apiDef pathItemMethod realPath =
 
 -- | Get response body schema.
 --
-getResponseBodySchema :: ApiDefinition -> StdMethod -> FilePath -> Int -> Maybe BodySchema
-getResponseBodySchema a DELETE p s = BodySchema <$> getResponseBodyReferencedSchema a _pathItemDelete p s
-getResponseBodySchema a GET    p s = BodySchema <$> getResponseBodyReferencedSchema a _pathItemGet p s
-getResponseBodySchema a PATCH  p s = BodySchema <$> getResponseBodyReferencedSchema a _pathItemPatch p s
-getResponseBodySchema a POST   p s = BodySchema <$> getResponseBodyReferencedSchema a _pathItemPost p s
-getResponseBodySchema a PUT    p s = BodySchema <$> getResponseBodyReferencedSchema a _pathItemPut p s
-getResponseBodySchema _ _      _ _ = Nothing
+getResponseBodySchema :: ResponseHeaders -> ApiDefinition -> StdMethod -> FilePath -> Int -> Maybe BodySchema
+getResponseBodySchema rhs a DELETE p s = BodySchema <$> getResponseBodyReferencedSchema rhs a _pathItemDelete p s
+getResponseBodySchema rhs a GET    p s = BodySchema <$> getResponseBodyReferencedSchema rhs a _pathItemGet p s
+getResponseBodySchema rhs a PATCH  p s = BodySchema <$> getResponseBodyReferencedSchema rhs a _pathItemPatch p s
+getResponseBodySchema rhs a POST   p s = BodySchema <$> getResponseBodyReferencedSchema rhs a _pathItemPost p s
+getResponseBodySchema rhs a PUT    p s = BodySchema <$> getResponseBodyReferencedSchema rhs a _pathItemPut p s
+getResponseBodySchema _   _ _      _ _ = Nothing
 
-getResponseBodyReferencedSchema :: ApiDefinition -> (PathItem -> Maybe Operation) -> FilePath -> Int -> Maybe (Referenced Schema)
-getResponseBodyReferencedSchema apiDef pathItemMethod realPath statusCode =
+getResponseBodyReferencedSchema :: ResponseHeaders -> ApiDefinition -> (PathItem -> Maybe Operation) -> FilePath -> Int -> Maybe (Referenced Schema)
+getResponseBodyReferencedSchema rhs apiDef pathItemMethod realPath statusCode =
   let
     openApi = getOpenApi apiDef
     mDefinitionsResponse = openApi ^? components . responses
@@ -137,7 +140,8 @@ getResponseBodyReferencedSchema apiDef pathItemMethod realPath statusCode =
         Just rr -> Just rr
         Nothing -> mResponses ^? _Just . default_ . _Just
     mResponse = dereference <$> mDefinitionsResponse <*> mReferencedResponse
-    mReferencedSchema = mResponse  ^? _Just . content . at "application/json" . _Just . schema . _Just
+    mContentType = fromString . B8.unpack <$> lookup hContentType rhs
+    mReferencedSchema = mContentType >>= \contentType -> mResponse  ^? _Just . content . at contentType . _Just . schema . _Just
   in
     mReferencedSchema
 

@@ -12,13 +12,10 @@ import qualified Data.ByteString.Char8                      as S8
 import qualified Data.ByteString.Lazy                       as L
 import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
 import           Data.IORef                                 (atomicModifyIORef, newIORef, readIORef)
-import           Network.HTTP.Types                         (ResponseHeaders, StdMethod,
-                                                             badRequest400, hContentType,
-                                                             internalServerError500, parseMethod,
-                                                             statusCode, statusIsSuccessful)
+import           Network.HTTP.Types
 import           Network.Wai                                (Middleware, Request, Response,
                                                              rawPathInfo, requestBody,
-                                                             requestMethod, responseLBS,
+                                                             requestMethod, responseHeaders, responseLBS,
                                                              responseStatus, responseToStream,
                                                              strictRequestBody)
 
@@ -107,7 +104,7 @@ responseValidator mkErrorJson vc app req sendResponse = app req $ \res -> do
                 Just path = S8.unpack <$> S8.stripPrefix (configuredPathPrefix vc) (rawPathInfo req)
                 statusCode' = statusCode status
                 mBodySchema = case eMethod of
-                    Right method -> getResponseBodySchema (configuredApiDefinition vc) method path statusCode'
+                    Right method -> getResponseBodySchema (responseHeaders res) (configuredApiDefinition vc) method path statusCode'
                     _            -> Nothing
 
             putStrLn ">>> [Response]"
@@ -154,9 +151,6 @@ getResponseBody res = do
             (pure ())
         toLazyByteString <$> readIORef ref
 
-responseHeaders :: ResponseHeaders
-responseHeaders = [(hContentType, "application/json")]
-
 --
 -- for non-middleware use
 --
@@ -167,8 +161,8 @@ validateRequestBody method path (toApiDefinition -> apiDef) body =
         Nothing         -> Left "Schema not found"
         Just bodySchema -> validateJsonDocument apiDef bodySchema body
 
-validateResponseBody :: StdMethod -> FilePath -> Int -> OpenApi -> L.ByteString -> Either String [String]
-validateResponseBody method path statusCode' (toApiDefinition -> apiDef) body =
-    case getResponseBodySchema apiDef method path statusCode' of
+validateResponseBody :: RequestHeaders -> StdMethod -> FilePath -> Int -> OpenApi -> L.ByteString -> Either String [String]
+validateResponseBody rhs method path statusCode' (toApiDefinition -> apiDef) body =
+    case getResponseBodySchema rhs apiDef method path statusCode' of
         Nothing         -> Left "Schema not found"
         Just bodySchema -> validateJsonDocument apiDef bodySchema body
