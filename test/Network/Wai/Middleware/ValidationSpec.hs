@@ -3,10 +3,13 @@
 
 module Network.Wai.Middleware.ValidationSpec (spec) where
 
+import           Control.Exception
 import           Control.Monad                     (forM_)
 import           Control.Monad.IO.Class            (liftIO)
+import           Data.Aeson
 import qualified Data.ByteString.Lazy              as L
-import           Data.Maybe                        (fromMaybe, isJust)
+import           Data.Maybe
+import           Data.OpenApi(OpenApi)
 import           Data.String.Here                  (here)
 import           Network.HTTP.Types                (StdMethod (GET, POST), methodPost, status201,
                                                     status400, status500)
@@ -17,8 +20,8 @@ import           Test.Hspec
 import           Network.Wai.Middleware.Validation
 
 
-openApiJson :: L.ByteString
-openApiJson = [here|
+testSpec :: OpenApi
+testSpec = fromJust $ decode $ [here|
 {
     "openapi": "3.0.0",
     "info": { "title": "validator test", "version": "1.0.0" },
@@ -104,11 +107,13 @@ openApiJson = [here|
 |]
 
 
+defaultRespHeaders = [("Content-Type", "application/json")]
+
 spec :: Spec
 spec = do
     describe "Middleware" $ do
         let
-            mkApp responseBody _ respond = respond $ responseLBS status201 responseHeaders responseBody
+            mkApp responseBody _ respond = respond $ responseLBS status201 defaultRespHeaders responseBody
             validResponseBody = [here| {"cint": 1, "ctxt": "RESPONSE"} |]
             invalidResponseBody = [here| {"cint": 1} |]
             mkSession requestBody = srequest $ SRequest (setPath (defaultRequest {requestMethod = methodPost}) "/articles") requestBody
@@ -116,7 +121,7 @@ spec = do
             invalidRequestBody = [here| {"cint": 1, "ctxt": 0} |]
 
         context "request and response validation" $ do
-            let validator = fromMaybe (error "Invalid OpenAPI document") (mkValidator' openApiJson)
+            let validator = mkValidator (Log $ \_ _ ve -> throw ve) "" testSpec
 
             it "do nothing if the request and response body is valid" $ do
                 sResponse <- liftIO $ runSession (mkSession validRequestBody) $ validator (mkApp validResponseBody)
@@ -133,7 +138,7 @@ spec = do
                     (status500, [here| {"title":"Validation failed","detail":"property \"ctxt\" is required, but not found in \"{\\\"cint\\\":1}\"\n"} |])
 
         context "request validation" $ do
-            let reqValidator = fromMaybe (error "Invalid OpenAPI document") (mkRequestValidator' openApiJson)
+            let reqValidator = fromMaybe (error "Invalid OpenAPI document") (requestValidator testSpec)
 
             it "do nothing if the request and response body is valid" $ do
                 sResponse <- liftIO $ runSession (mkSession validRequestBody) $ reqValidator (mkApp validResponseBody)
@@ -149,7 +154,7 @@ spec = do
                 (simpleStatus sResponse, simpleBody sResponse) `shouldBe` (status201, invalidResponseBody)
 
         context "response validation" $ do
-            let resValidator = fromMaybe (error "Invalid OpenAPI document") (mkResponseValidator' openApiJson)
+            let resValidator = fromMaybe (error "Invalid OpenAPI document") (responseValidator testSpec)
 
             it "do nothing if the request and response body is valid" $ do
                 sResponse <- liftIO $ runSession (mkSession validRequestBody) $ resValidator (mkApp validResponseBody)
@@ -166,7 +171,7 @@ spec = do
 
     describe "mkValidator'" $ do
         it "returns Just Middleware if the OpenAPI document is valid" $
-            isJust (mkValidator' openApiJson) `shouldBe` True
+            isJust (mkValidator' testSpec) `shouldBe` True
 
         it "returns Nothing if the OpenAPI document is invalid" $
             isJust (mkValidator' "") `shouldBe` False
@@ -182,12 +187,12 @@ spec = do
 |]
             isJust (mkValidator' json) `shouldBe` False
 
-    describe "mkRequestValidator'" $ do
+    describe "requestValidator" $ do
         it "returns Just Middleware if the OpenAPI document is valid" $
-            isJust (mkRequestValidator' openApiJson) `shouldBe` True
+            isJust (requestValidator testSpec) `shouldBe` True
 
         it "returns Nothing if the OpenAPI document is invalid" $
-            isJust (mkRequestValidator' "") `shouldBe` False
+            isJust (requestValidator "") `shouldBe` False
 
         it "returns Nothing if the OpenAPI document has no paths object" $ do
             let json = [here|
@@ -198,14 +203,14 @@ spec = do
     }
 }
 |]
-            isJust (mkRequestValidator' json) `shouldBe` False
+            isJust (requestValidator json) `shouldBe` False
 
     describe "mkResponseValidator'" $ do
         it "returns Just Middleware if the OpenAPI document is valid" $
-            isJust (mkResponseValidator' openApiJson) `shouldBe` True
+            isJust (responseValidator testSpec) `shouldBe` True
 
         it "returns Nothing if the OpenAPI document is invalid" $
-            isJust (mkResponseValidator' "") `shouldBe` False
+            isJust (responseValidator "") `shouldBe` False
 
         it "returns Nothing if the OpenAPI document has no paths object" $ do
             let json = [here|
@@ -216,7 +221,7 @@ spec = do
     }
 }
 |]
-            isJust (mkResponseValidator' json) `shouldBe` False
+            isJust (responseValidator json) `shouldBe` False
 
     describe "validateRequestBody" $ do
         let makeOpenApiJson schemaJson = [here|
@@ -849,4 +854,4 @@ spec = do
             forM_ tests $ \(description, schemaJson, bodyJson, result) ->
                 it description $ do
                     let apiJson = makeOpenApiJson schemaJson
-                    validateResponseBody GET "/examples" 200 apiJson bodyJson `shouldBe` result
+                    validateResponseBody defaultRespHeaders GET "/examples" 200 apiJson bodyJson `shouldBe` result

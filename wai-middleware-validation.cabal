@@ -17,12 +17,12 @@ extra-source-files:  README.md
 library
   hs-source-dirs:      src
   exposed-modules:     Network.Wai.Middleware.Validation
-                       Network.Wai.Middleware.Validation.Internal
   build-depends:       base >= 4.7 && < 5
                      , aeson
                      , bytestring
                      , containers
                      , filepath
+                     , http-media
                      , http-types
                      , insert-ordered-containers
                      , lens
@@ -39,6 +39,7 @@ test-suite wai-middleware-validation-test
   hs-source-dirs:      test
   ghc-options:         -Wall
   build-depends:       base >= 4.7 && < 5
+                     , aeson
                      , bytestring
                      , here
                      , hspec

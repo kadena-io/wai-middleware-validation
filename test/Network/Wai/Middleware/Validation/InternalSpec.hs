@@ -3,19 +3,20 @@
 
 module Network.Wai.Middleware.Validation.InternalSpec (spec) where
 
-import           Data.ByteString.Lazy                       as L
-import           Data.Either                                (isLeft)
-import           Data.Maybe                                 (fromJust, isJust)
-import           Data.OpenApi
-import           Data.String.Here                           (here)
-import           Network.HTTP.Types                         (StdMethod (GET, POST, PUT))
-import           Test.Hspec
+import Control.Exception
+import Data.Aeson
+import Data.ByteString.Lazy                       as L
+import Data.Either                                (isLeft)
+import Data.Maybe                                 (fromJust, isJust)
+import Data.OpenApi
+import Data.String.Here                           (here)
+import Network.HTTP.Types                         (StdMethod (GET, POST, PUT))
+import Test.Hspec
 
-import           Network.Wai.Middleware.Validation.Internal
+import Network.Wai.Middleware.Validation.Internal
 
-
-openApiJson :: L.ByteString
-openApiJson = [here|
+openApiJson :: OpenApi
+openApiJson = fromJust $ decode $ [here|
 {
     "openapi": "3.0.0",
     "info": { "title": "validator test", "version": "1.0.0" },
@@ -90,7 +91,7 @@ openApiJson = [here|
 |]
 
 apiDef :: ApiDefinition
-apiDef = fromJust $ toApiDefinition openApiJson
+apiDef = toApiDefinition openApiJson
 
 postRequestBodySchema :: BodySchema
 postRequestBodySchema = fromJust $ getRequestBodySchema apiDef POST "/articles"
@@ -104,26 +105,10 @@ putRequestBodySchema = fromJust $ getRequestBodySchema apiDef PUT "/articles/1"
 -- putResponseBodySchema :: BodySchema
 -- putResponseBodySchema = fromJust $ getPutResponseBodySchema apiDef "/articles/1" 200
 
+defaultRespHeaders = [("Content-Type", "application/json")]
+
 spec :: Spec
 spec = do
-    describe "toApiDefinition" $ do
-        it "returns Just ApiDefinition if the OpenAPI document is valid" $
-            toApiDefinition openApiJson `shouldSatisfy` isJust
-
-        it "returns Nothing if the OpenAPI document is invalid" $
-            toApiDefinition "" `shouldBe` Nothing
-
-        it "returns Nothing if the OpenAPI document has no paths object" $ do
-            let json = [here|
-{
-    "openapi": "3.0.0",
-    "info": { "title": "info example", "version": "1.0.0" },
-    "components": {
-    }
-}
-|]
-            toApiDefinition json `shouldBe` Nothing
-
     describe "getRequestBodySchema" $ do
         context "when getting POST request body schema" $ do
             it "returns Just BodySchema if the specified path is defined" $
@@ -177,32 +162,32 @@ spec = do
     describe "getResponseBodySchema" $ do
         context "when getting GET response body schema" $ do
             it "returns Just BodySchema if the specified path and the status is defined" $
-                getResponseBodySchema apiDef GET "/articles" 200 `shouldSatisfy` isJust
+                getResponseBodySchema defaultRespHeaders apiDef GET "/articles" 200 `shouldSatisfy` isJust
 
             it "returns Nothing if the specified path is defined but the status is not defined" $
-                getResponseBodySchema apiDef GET "/articles" 300 `shouldBe` Nothing
+                getResponseBodySchema defaultRespHeaders apiDef GET "/articles" 300 `shouldBe` Nothing
 
             it "returns Nothing if the specified path is not defined" $
-                getResponseBodySchema apiDef GET "/null" 200 `shouldBe` Nothing
+                getResponseBodySchema defaultRespHeaders apiDef GET "/null" 200 `shouldBe` Nothing
 
         context "when getting POST request body schema" $
             it "returns Nothing if the specified path is defined but the response schema is not defined" $
-                getResponseBodySchema apiDef POST "/articles" 200 `shouldBe` Nothing
+                getResponseBodySchema defaultRespHeaders apiDef POST "/articles" 200 `shouldBe` Nothing
 
     describe "getResponseBodyReferencedSchema" $ do
         context "when getting GET response body schema" $ do
             it "returns Just (Referenced Schema) if the operation for the specified path is defined" $
-                getResponseBodyReferencedSchema apiDef _pathItemGet "/articles" 200 `shouldSatisfy` isJust
+                getResponseBodyReferencedSchema defaultRespHeaders apiDef _pathItemGet "/articles" 200 `shouldSatisfy` isJust
 
             it "returns Nothing if the operation for the specified path is not defined" $
-                getResponseBodyReferencedSchema apiDef _pathItemGet "/articles" 300 `shouldBe` Nothing
+                getResponseBodyReferencedSchema defaultRespHeaders apiDef _pathItemGet "/articles" 300 `shouldBe` Nothing
 
             it "returns Nothing if the specified path is defined" $
-                getResponseBodyReferencedSchema apiDef _pathItemGet "/null" 200 `shouldBe` Nothing
+                getResponseBodyReferencedSchema defaultRespHeaders apiDef _pathItemGet "/null" 200 `shouldBe` Nothing
 
         context "when getting POST response body schema" $
             it "returns Nothing if the specified path is defined but the response schema is not defined" $
-                getResponseBodyReferencedSchema apiDef _pathItemPost "/articles" 200 `shouldBe` Nothing
+                getResponseBodyReferencedSchema defaultRespHeaders apiDef _pathItemPost "/articles" 200 `shouldBe` Nothing
 
     describe "getPathItem" $ do
         it "returns Just PathItem if the specified path is defined" $
@@ -223,7 +208,7 @@ spec = do
     "ctxt": "foo"
 }
 |]
-                validateJsonDocument apiDef postRequestBodySchema requestBodyJson `shouldBe` Right []
+                validateJsonDocument (vError RequestError) apiDef postRequestBodySchema requestBodyJson `shouldBe` ()
 
             it "returns validation errors if the request body does not satisfy any constraints" $ do
                 let requestBodyJson = [here|
@@ -232,7 +217,7 @@ spec = do
     "ctxt": "foo"
 }
 |]
-                validateJsonDocument apiDef postRequestBodySchema requestBodyJson `shouldSatisfy` hasValidationError
+                evaluate (validateJsonDocument (vError RequestError) apiDef postRequestBodySchema requestBodyJson) `shouldThrow` someValidationError
 
         context "when validating PUT request body" $ do
             it "returns Right [] if the request body satisfy all constraints" $ do
@@ -242,7 +227,7 @@ spec = do
     "ctxt": "foo"
 }
 |]
-                validateJsonDocument apiDef putRequestBodySchema requestBodyJson `shouldBe` Right []
+                validateJsonDocument (vError RequestError) apiDef putRequestBodySchema requestBodyJson `shouldBe` ()
 
             it "returns validation errors if the request body does not satisfy any constraints" $ do
                 let requestBodyJson = [here|
@@ -251,16 +236,14 @@ spec = do
     "ctxt": "foo"
 }
 |]
-                validateJsonDocument apiDef putRequestBodySchema requestBodyJson `shouldSatisfy` hasValidationError
+                evaluate (validateJsonDocument (vError RequestError) apiDef putRequestBodySchema requestBodyJson) `shouldThrow` someValidationError
 
             it "returns Left if the request body is not valid JSON" $ do
                 let requestBodyJson = [here|
 cint: 1
 ctxt: "foo"
 |]
-                validateJsonDocument apiDef putRequestBodySchema requestBodyJson `shouldSatisfy` isLeft
+                evaluate (validateJsonDocument (vError RequestError) apiDef putRequestBodySchema requestBodyJson) `shouldThrow` someValidationError
 
-hasValidationError :: Either String [String] -> Bool
-hasValidationError (Right []) = False
-hasValidationError (Right _)  = True
-hasValidationError (Left _)   = False
+someValidationError :: ValidationException -> Bool
+someValidationError _ = True
