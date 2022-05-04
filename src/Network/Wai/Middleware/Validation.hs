@@ -132,11 +132,14 @@ requestValidator vc app req sendResponse = do
                 vError ResponseError "no content type"
             (_, Left err) ->
                 vError ResponseError $ "error parsing HTTP method: " <> S8.unpack err
-            (Just contentType, Right method) -> do
-                let
-                    schema = fromMaybe (vError ResponseError "no such path/contentType/method combination") $
-                        requestSchema (configuredApiDefinition vc) path contentType method
-                validateJsonDocument (vError RequestError) (configuredApiDefinition vc) schema body
+            (Just contentType, Right method)
+                | elem method [POST, PUT] ->
+                    let
+                        schema = fromMaybe (vError ResponseError "no such path/contentType/method combination") $
+                            requestSchema (configuredApiDefinition vc) path contentType method
+                    in
+                        validateJsonDocument (vError RequestError) (configuredApiDefinition vc) schema body
+                | otherwise -> ()
 
     app req sendResponse
 
