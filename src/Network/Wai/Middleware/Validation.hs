@@ -11,6 +11,7 @@ module Network.Wai.Middleware.Validation
     , requestValidator
     , responseValidator
     , Log(..)
+    , ValidationException(..)
     , validateRequestBody
     , validateResponseBody
     , toApiDefinition
@@ -152,16 +153,11 @@ responseValidator vc app req sendResponse = app req $ \res -> do
         mContentType = getContentType (Wai.responseHeaders res)
         statusCode' = statusCode status
 
-    putStrLn ">>> [Response]"
-    putStrLn $ ">>> Method: " ++ show eMethod
-    putStrLn $ ">>> Path: " ++ path
-    putStrLn $ ">>> Status: " ++ show statusCode'
-
     body <- getResponseBody res
 
     handle (runLog (configuredLog vc) req (Just res)) $ evaluate $
         case (mContentType, eMethod) of
-            (Nothing, _) -> do
+            (Nothing, _) ->
                 vError ResponseError "no content type"
             (_, Left err) ->
                 vError ResponseError $ "error parsing HTTP method: " <> S8.unpack err
@@ -237,7 +233,8 @@ operationRequestSchema contentType openApi operation = do
     deref <- dereference <$> (openApi ^? components . requestBodies) <*> req
     deref ^? content . at contentType . _Just . schema . _Just
 
-getContentType headers = fromString . S8.unpack <$> lookup hContentType headers
+getContentType headers =
+    fromString . S8.unpack <$> lookup hContentType headers
 
 operationForPath apiDef realPath method = getPathItem apiDef realPath >>= operationForMethod method
 
