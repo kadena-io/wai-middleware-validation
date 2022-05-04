@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections     #-}
 {-# LANGUAGE ViewPatterns      #-}
@@ -38,6 +39,7 @@ import Network.HTTP.Media.MediaType
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
 import System.FilePath (splitDirectories)
+import Debug.Trace
 
 import Data.OpenApi
   ( HttpStatusCode, OpenApi, Operation, PathItem
@@ -58,8 +60,8 @@ data ValidationException
     deriving (Typeable)
 
 instance Show ValidationException where
-    show (ValidationException RequestError msg) = "Request invalid:\n" <> msg
-    show (ValidationException ResponseError msg) = "Response invalid:\n" <> msg
+    show (ValidationException RequestError msg) = "Request invalid: " <> msg
+    show (ValidationException ResponseError msg) = "Response invalid: " <> msg
 
 instance Exception ValidationException
 
@@ -91,7 +93,15 @@ toApiDefinition openApi =
 --
 
 data TemplatedPathComponent = Exact FilePath | ParameterValue
-    deriving (Eq, Ord, Show)
+    deriving (Show)
+
+instance Eq TemplatedPathComponent where
+    Exact l == Exact r = l == r
+    _ == _ = True
+
+instance Ord TemplatedPathComponent where
+    compare (Exact l) (Exact r) = compare l r
+    compare _ _                 = EQ
 
 toTemplatedPathComponent :: FilePath -> TemplatedPathComponent
 toTemplatedPathComponent s
@@ -123,26 +133,22 @@ requestValidator vc app req sendResponse = do
     let
         eMethod = parseMethod $ Wai.requestMethod req
         Just path = S8.unpack <$> S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-        mContentType = getContentType (Wai.requestHeaders req)
+        contentType = fromMaybe "application/json;charset=utf-8" $ getContentType (Wai.requestHeaders req)
 
     (body, newReq) <- getRequestBody req
 
     handle (runLog (configuredLog vc) req Nothing) $ evaluate $
-        case (mContentType, eMethod) of
-            (Nothing, _) ->
-                vError ResponseError "no content type"
-            (_, Left err) ->
-                vError ResponseError $ "error parsing HTTP method: " <> S8.unpack err
-            (Just contentType, Right method)
-                | elem method [POST, PUT] ->
-                    let
-                        schema = fromMaybe (vError ResponseError "no such path/contentType/method combination") $
-                            requestSchema (configuredApiDefinition vc) path contentType method
-                    in
-                        validateJsonDocument (vError RequestError) (configuredApiDefinition vc) schema body
-                | otherwise -> ()
+        case eMethod of
+            Left err ->
+                vError RequestError $ "error parsing HTTP method: " <> S8.unpack err
+            Right method | elem method [POST, PUT] ->
+                let
+                    schema = requestSchema (configuredApiDefinition vc) path contentType method
+                in
+                    validateJsonDocument (vError RequestError) (configuredApiDefinition vc) schema body
+            _ -> ()
 
-    app req sendResponse
+    app newReq sendResponse
 
 responseValidator :: ValidatorConfiguration -> Wai.Middleware
 responseValidator vc app req sendResponse = app req $ \res -> do
@@ -150,21 +156,18 @@ responseValidator vc app req sendResponse = app req $ \res -> do
         status = Wai.responseStatus res
         eMethod = parseMethod $ Wai.requestMethod req
         Just path = S8.unpack <$> S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-        mContentType = getContentType (Wai.responseHeaders res)
+        contentType = fromMaybe "application/json;charset=utf-8" $ getContentType (Wai.responseHeaders res)
         statusCode' = statusCode status
 
     body <- getResponseBody res
 
     handle (runLog (configuredLog vc) req (Just res)) $ evaluate $
-        case (mContentType, eMethod) of
-            (Nothing, _) ->
-                vError ResponseError "no content type"
-            (_, Left err) ->
+        case eMethod of
+            Left err ->
                 vError ResponseError $ "error parsing HTTP method: " <> S8.unpack err
-            (Just contentType, Right method) -> do
+            Right method -> do
                 let
-                    schema = fromMaybe (vError RequestError "no such path/contentType/method combination") $
-                        responseSchema (configuredApiDefinition vc) path contentType method statusCode'
+                    schema = responseSchema (configuredApiDefinition vc) path contentType method statusCode'
                 validateJsonDocument (vError ResponseError) (configuredApiDefinition vc) schema body
     sendResponse res
 
@@ -195,17 +198,14 @@ validateRequestBody :: RequestHeaders -> StdMethod -> FilePath -> OpenApi -> L.B
 validateRequestBody rhs method path (toApiDefinition -> apiDef) body =
     case getContentType rhs of
         Nothing -> vError RequestError "no content type"
-        Just contentType -> case requestSchema apiDef path contentType method of
-            Nothing -> vError RequestError "Schema not found"
-            Just bodySchema -> validateJsonDocument (vError RequestError) apiDef bodySchema body
+        Just contentType | bodySchema <- requestSchema apiDef path contentType method -> validateJsonDocument (vError RequestError) apiDef bodySchema body
 
 validateResponseBody :: ResponseHeaders -> StdMethod -> FilePath -> Int -> OpenApi -> L.ByteString -> ()
 validateResponseBody rhs method path statusCode' (toApiDefinition -> apiDef) body =
     case getContentType rhs of
         Nothing -> vError ResponseError "no content type"
-        Just contentType -> case responseSchema apiDef path contentType method statusCode' of
-            Nothing         -> vError ResponseError "Schema not found"
-            Just bodySchema -> validateJsonDocument (vError ResponseError) apiDef bodySchema body
+        Just contentType | bodySchema <- responseSchema apiDef path contentType method statusCode' ->
+            validateJsonDocument (vError ResponseError) apiDef bodySchema body
 
 -- internals
 
@@ -236,15 +236,23 @@ operationRequestSchema contentType openApi operation = do
 getContentType headers =
     fromString . S8.unpack <$> lookup hContentType headers
 
-operationForPath apiDef realPath method = getPathItem apiDef realPath >>= operationForMethod method
+requestSchema apiDef realPath contentType method = let
+    !pathItem = traceShowId $ fromMaybe (vError RequestError $ "no such path: " <> realPath) $
+        getPathItem apiDef realPath
+    !operation = fromMaybe (vError RequestError $ "no such method for that path") $
+        operationForMethod method pathItem
+    !schema = fromMaybe (vError RequestError "no schema for that request") $
+        operationRequestSchema contentType (getOpenApi apiDef) operation
+    in schema
 
-requestSchema apiDef realPath contentType method =
-    operationForPath apiDef realPath method >>=
-        operationRequestSchema contentType (getOpenApi apiDef)
-
-responseSchema apiDef realPath contentType method statusCode =
-    operationForPath apiDef realPath method >>=
-        operationResponseSchema statusCode contentType (getOpenApi apiDef)
+responseSchema apiDef realPath contentType method statusCode = let
+    !pathItem = fromMaybe (vError ResponseError $ "no such path: " <> realPath) $
+        getPathItem apiDef realPath
+    !operation = fromMaybe (vError ResponseError $ "no such method for that path") $
+        operationForMethod method pathItem
+    !schema = fromMaybe (vError ResponseError "no schema for that response") $
+        operationResponseSchema statusCode contentType (getOpenApi apiDef) operation
+    in schema
 
 getPathItem :: ApiDefinition -> FilePath -> Maybe PathItem
 getPathItem apiDef realPath = do
