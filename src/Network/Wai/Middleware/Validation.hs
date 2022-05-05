@@ -89,14 +89,14 @@ data ApiDefinition = ApiDefinition
 
 data PathMap = PathMap
     { _pathHere :: !(Maybe FilePath)
-    , _pathCapture :: !PathMap
+    , _pathCapture :: !(Maybe PathMap)
     , _pathSubdirs :: !(M.Map String PathMap)
     } deriving (Show, Eq)
 
 makeLenses ''PathMap
 
 emptyPathMap :: PathMap
-emptyPathMap = PathMap Nothing emptyPathMap M.empty
+emptyPathMap = PathMap Nothing Nothing M.empty
 
 insertPathMap :: PathMap -> FilePath -> PathMap
 insertPathMap pm path = go (splitDirectories path) pm
@@ -106,7 +106,7 @@ insertPathMap pm path = go (splitDirectories path) pm
         Just path' -> error $ "path conflict between " <> path <> " and " <> path'
     go (p:ps) pm
         | not (null p) && head p == '{' && last p == '}'
-            = pm & pathCapture %~ go ps
+            = pm & pathCapture %~ Just . go ps . fromMaybe emptyPathMap
         | otherwise
             = pm & pathSubdirs . at p %~ Just . go ps . fromMaybe emptyPathMap
 
@@ -119,7 +119,7 @@ lookupDefinedPath path pm = go (splitDirectories path) pm
     go [] pm = _pathHere pm
     go (p:ps) pm = asum
         [ go ps =<< M.lookup p (_pathSubdirs pm)
-        , go ps (_pathCapture pm)
+        , go ps =<< _pathCapture pm
         ]
 
 toApiDefinition :: OpenApi -> ApiDefinition
