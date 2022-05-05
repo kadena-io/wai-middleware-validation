@@ -6,6 +6,7 @@
 {-# LANGUAGE ViewPatterns      #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE GADTs      #-}
+{-# LANGUAGE TemplateHaskell      #-}
 
 module Network.Wai.Middleware.Validation
     ( mkValidator
@@ -38,7 +39,7 @@ import Data.Typeable
 import Network.HTTP.Media.MediaType
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
-import System.FilePath (splitDirectories)
+import System.FilePath (joinPath, splitDirectories)
 import Debug.Trace
 
 import Data.OpenApi
@@ -81,43 +82,51 @@ data ApiDefinition = ApiDefinition
     , getPathMap :: !PathMap
     } deriving (Eq, Show)
 
-toApiDefinition :: OpenApi -> ApiDefinition
-toApiDefinition openApi =
-  ApiDefinition openApi pathMap
-  where
-    pathMap = makePathMap (keys $ openApi ^. paths)
-
 --
 -- For reverse look up of path
 -- https://swagger.io/specification/#path-templating-matching
 --
 
-data TemplatedPathComponent = Exact FilePath | ParameterValue
-    deriving (Show)
+data PathMap = PathMap
+    { _pathHere :: !(Maybe FilePath)
+    , _pathCapture :: !PathMap
+    , _pathSubdirs :: !(M.Map String PathMap)
+    } deriving (Show, Eq)
 
-instance Eq TemplatedPathComponent where
-    Exact l == Exact r = l == r
-    _ == _ = True
+makeLenses ''PathMap
 
-instance Ord TemplatedPathComponent where
-    compare (Exact l) (Exact r) = compare l r
-    compare _ _                 = EQ
+emptyPathMap :: PathMap
+emptyPathMap = PathMap Nothing emptyPathMap M.empty
 
-toTemplatedPathComponent :: FilePath -> TemplatedPathComponent
-toTemplatedPathComponent s
-    | not (null s) && head s == '{' && last s == '}' = ParameterValue
-    | otherwise = Exact s
-
-toTemplatedPath :: FilePath -> [TemplatedPathComponent]
-toTemplatedPath p = toTemplatedPathComponent <$> splitDirectories p
-
-type PathMap = M.Map [TemplatedPathComponent] FilePath
+insertPathMap :: PathMap -> FilePath -> PathMap
+insertPathMap pm path = go (splitDirectories path) pm
+  where
+    go [] pm = case _pathHere pm of
+        Nothing -> pm { _pathHere = Just path }
+        Just path' -> error $ "path conflict between " <> path <> " and " <> path'
+    go (p:ps) pm
+        | not (null p) && head p == '{' && last p == '}'
+            = pm & pathCapture %~ go ps
+        | otherwise
+            = pm & pathSubdirs . at p %~ Just . go ps . fromMaybe emptyPathMap
 
 makePathMap :: [FilePath] -> PathMap
-makePathMap ps = M.fromList $ zip (map toTemplatedPath ps) ps
+makePathMap = foldl' insertPathMap emptyPathMap
 
 lookupDefinedPath :: FilePath -> PathMap -> Maybe FilePath
-lookupDefinedPath realPath = M.lookup (toTemplatedPath realPath)
+lookupDefinedPath path pm = go (splitDirectories path) pm
+  where
+    go [] pm = _pathHere pm
+    go (p:ps) pm = asum
+        [ go ps =<< M.lookup p (_pathSubdirs pm)
+        , go ps (_pathCapture pm)
+        ]
+
+toApiDefinition :: OpenApi -> ApiDefinition
+toApiDefinition openApi =
+  ApiDefinition openApi pathMap
+  where
+    pathMap = makePathMap (keys $ openApi ^. paths)
 
 -- TODO: check that the response content type is an accepted content type in the request (or something)
 
@@ -237,7 +246,7 @@ getContentType headers =
     fromString . S8.unpack <$> lookup hContentType headers
 
 requestSchema apiDef realPath contentType method = let
-    !pathItem = traceShowId $ fromMaybe (vError RequestError $ "no such path: " <> realPath) $
+    !pathItem = fromMaybe (vError RequestError $ "no such path: " <> realPath) $
         getPathItem apiDef realPath
     !operation = fromMaybe (vError RequestError $ "no such method for that path") $
         operationForMethod method pathItem
