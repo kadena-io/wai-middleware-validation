@@ -137,6 +137,9 @@ mkValidator log pathPrefix openApi =
   where
     mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi) log
 
+contentTypeIsJson contentType =
+    mainType contentType == "application" && subType contentType == "json"
+
 requestValidator :: ValidatorConfiguration -> Wai.Middleware
 requestValidator vc app req sendResponse = do
     let
@@ -150,7 +153,7 @@ requestValidator vc app req sendResponse = do
         case eMethod of
             Left err ->
                 vError RequestError $ "error parsing HTTP method: " <> S8.unpack err
-            Right method | elem method [POST, PUT] ->
+            Right method | elem method [POST, PUT], contentTypeIsJson contentType ->
                 let
                     schema = requestSchema (configuredApiDefinition vc) path contentType method
                 in
@@ -174,10 +177,11 @@ responseValidator vc app req sendResponse = app req $ \res -> do
         case eMethod of
             Left err ->
                 vError ResponseError $ "error parsing HTTP method: " <> S8.unpack err
-            Right method -> do
+            Right method | contentTypeIsJson contentType -> do
                 let
                     schema = responseSchema (configuredApiDefinition vc) path contentType method statusCode'
                 validateJsonDocument (vError ResponseError) (configuredApiDefinition vc) schema body
+            _ -> ()
     sendResponse res
 
 getRequestBody :: Wai.Request -> IO (L.ByteString, Wai.Request)
