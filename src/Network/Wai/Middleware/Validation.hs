@@ -141,11 +141,11 @@ requestValidator vc app req sendResponse = do
     (body, newReq) <- getRequestBody req
 
     handle (runLog (configuredLog vc) req Nothing) $ evaluate $ let
+        openApi = getOpenApi $ configuredApiDefinition vc
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
         path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
             fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-        contentType = fromMaybe "application/json;charset=utf-8" $ getContentType (Wai.requestHeaders req)
-        openApi = getOpenApi $ configuredApiDefinition vc
+        contentType = getContentType (Wai.requestHeaders req) 
         componentRequestBodies = openApi ^. OA.components . OA.requestBodies
         pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
             getPathItem (configuredApiDefinition vc) path
@@ -170,21 +170,22 @@ responseValidator vc app req sendResponse = app req $ \res -> do
     body <- getResponseBody res
 
     handle (runLog (configuredLog vc) req (Just res)) $ evaluate $ let
-        status = statusCode $ Wai.responseStatus res
-        method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
-        Just path = S8.unpack <$> S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-        contentType = fromMaybe "application/json;charset=utf-8" $ getContentType (Wai.responseHeaders res)
         openApi = getOpenApi $ configuredApiDefinition vc
-        componentResponses = openApi ^. OA.components . OA.responses
+        status = statusCode $ Wai.responseStatus res
+        method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ 
+            parseMethod $ Wai.requestMethod req
+        path = fromMaybe (vResponseError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
+            fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
+        contentType = getContentType (Wai.responseHeaders res)
         pathItem = fromMaybe (vResponseError $ "no such path: " <> path) $
             getPathItem (configuredApiDefinition vc) path
         operation = fromMaybe (vResponseError $ "no such method for that path") $
             operationForMethod method pathItem
         resp = fromMaybe (vResponseError $ "no response for that status code") $ asum
-            [ operation ^? OA.responses . at status . _Just
-            , operation ^? OA.responses . OA.default_ . _Just
+            [ operation ^. OA.responses . at status 
+            , operation ^. OA.responses . OA.default_ 
             ]
-        derefResp = OA.dereference componentResponses resp
+        derefResp = OA.dereference (openApi ^. OA.components . OA.responses) resp
         respSchema = fromMaybe (vResponseError "no schema for that response") $
             derefResp ^? OA.content . at contentType . _Just . OA.schema . _Just
         validateRespSchema =
@@ -194,7 +195,6 @@ responseValidator vc app req sendResponse = app req $ \res -> do
         in
             validateRespSchema
     sendResponse res
-    where
 
 getRequestBody :: Wai.Request -> IO (L.ByteString, Wai.Request)
 getRequestBody req = do
@@ -244,9 +244,10 @@ operationForMethod POST = OA._pathItemPost
 operationForMethod PUT = OA._pathItemPut
 operationForMethod _ = const Nothing
 
-getContentType :: [Header] -> Maybe MediaType
+getContentType :: [Header] -> MediaType
 getContentType headers =
-    fromString . S8.unpack <$> lookup hContentType headers
+    fromMaybe "application/json;charset=utf-8" $ 
+        fromString . S8.unpack <$> lookup hContentType headers
 
 getPathItem :: ApiDefinition -> FilePath -> Maybe OA.PathItem
 getPathItem apiDef realPath = do
@@ -262,7 +263,7 @@ validateJsonDocument err apiDef bodySchema dataJson =
     decoded = fromMaybe (err "The document is not valid JSON") $ Aeson.decode dataJson
     openApi = getOpenApi apiDef
     allSchemas = openApi ^. OA.components . OA.schemas
-    dereferencedSchema = allSchemas `OA.dereference` bodySchema
+    dereferencedSchema = OA.dereference allSchemas bodySchema
     errors = map fixValidationError $ OA.validateJSON allSchemas dereferencedSchema decoded
 
 fixValidationError :: String -> String
