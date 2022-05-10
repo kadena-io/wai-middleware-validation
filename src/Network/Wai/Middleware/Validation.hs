@@ -23,10 +23,12 @@ module Network.Wai.Middleware.Validation
 import Control.Exception
 import Control.Lens hiding ((.=))
 import qualified Data.Aeson as Aeson
+import Data.Align
 import qualified Data.ByteString as BS
-import Data.ByteString.Builder                    (toLazyByteString)
-import qualified Data.ByteString.Char8                      as S8
-import qualified Data.ByteString.Lazy                       as L
+import Data.ByteString.Builder (toLazyByteString)
+import qualified Data.ByteString.Char8 as S8
+import qualified Data.ByteString.Lazy as L
+import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Foldable
 import Data.HashMap.Strict.InsOrd (keys)
 import Data.IORef                                 (atomicModifyIORef, newIORef, readIORef)
@@ -34,6 +36,8 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.String
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
+import Data.These
 import Data.Typeable
 import Network.HTTP.Media.MediaType
 import Network.HTTP.Types
@@ -136,6 +140,9 @@ mkValidator log pathPrefix openApi =
 contentTypeIsJson contentType =
     mainType contentType == "application" && subType contentType == "json"
 
+deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
+deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
+
 requestValidator :: ValidatorConfiguration -> Wai.Middleware
 requestValidator vc app req sendResponse = do
     (body, newReq) <- getRequestBody req
@@ -145,23 +152,55 @@ requestValidator vc app req sendResponse = do
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
         path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
             fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-        contentType = getContentType (Wai.requestHeaders req) 
-        componentRequestBodies = openApi ^. OA.components . OA.requestBodies
+        contentType = getContentType (Wai.requestHeaders req)
         pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
             getPathItem (configuredApiDefinition vc) path
         operation = fromMaybe (vRequestError $ "no such method for that path") $
             operationForMethod method pathItem
-        reqBody = fromMaybe (vRequestError $ "no request body for that method") $
+        reqBody = deref openApi OA.requestBodies $
+            fromMaybe (vRequestError $ "no request body for that method") $
             operation ^. OA.requestBody
-        derefReqBody = OA.dereference componentRequestBodies reqBody
         reqSchema = fromMaybe (vRequestError $ "no schema for that request") $
-            derefReqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
+            reqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
         validateReqSchema =
             if elem method [POST, PUT] && contentTypeIsJson contentType then
-                validateJsonDocument vRequestError (configuredApiDefinition vc) reqSchema body
+                validateJsonDocument vRequestError openApi reqSchema body
             else ()
+        pathItemParams = deref openApi OA.parameters <$> operation ^. OA.parameters
+        expectedQueryParams = [ (T.encodeUtf8 $ OA._paramName p, p) | p <- pathItemParams, OA._paramIn p == OA.ParamQuery ]
+        validateQueryParams = let
+            checkQueryParam k v = case v of
+                This _ -> paramError "this parameter is not specified"
+                That p ->
+                    -- per https://swagger.io/docs/specification/describing-parameters/ section "Required and Optional Parameters",
+                    -- parameters are not required by default
+                    if fromMaybe False (OA._paramRequired p)
+                    then paramError "this parameter is required and not present"
+                    else ()
+                These maybeValue param -> case maybeValue of
+                    Nothing ->
+                        if fromMaybe False $ OA._paramAllowEmptyValue param then ()
+                        else vRequestError $ unwords ["empty value for query parameter", S8.unpack k, "is not allowed"]
+                    Just value -> let
+                        schema = fromMaybe (paramError "no schema specified for this parameter") (OA._paramSchema param)
+                        addQuotes v =
+                            if not (S8.null v) && S8.head v == '\"'
+                            then v
+                            else "\"" <> v <> "\""
+                        value' =
+                            if OA._schemaType (deref openApi OA.schemas schema) == Just OA.OpenApiString
+                            then addQuotes value
+                            else value
+                        in
+                            validateJsonDocument paramError openApi schema (L.fromStrict value')
+              where
+                paramError :: String -> a
+                paramError e =
+                    vRequestError $ unwords [ "error validating query parameter", S8.unpack k, "-", e ]
+            in
+                M.foldl' seq () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
         in
-            validateReqSchema
+            validateReqSchema `seq` validateQueryParams
 
     app newReq sendResponse
 
@@ -172,7 +211,7 @@ responseValidator vc app req sendResponse = app req $ \res -> do
     handle (runLog (configuredLog vc) req (Just res)) $ evaluate $ let
         openApi = getOpenApi $ configuredApiDefinition vc
         status = statusCode $ Wai.responseStatus res
-        method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ 
+        method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $
             parseMethod $ Wai.requestMethod req
         path = fromMaybe (vResponseError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
             fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
@@ -181,16 +220,18 @@ responseValidator vc app req sendResponse = app req $ \res -> do
             getPathItem (configuredApiDefinition vc) path
         operation = fromMaybe (vResponseError $ "no such method for that path") $
             operationForMethod method pathItem
-        resp = fromMaybe (vResponseError $ "no response for that status code") $ asum
-            [ operation ^. OA.responses . at status 
-            , operation ^. OA.responses . OA.default_ 
-            ]
-        derefResp = OA.dereference (openApi ^. OA.components . OA.responses) resp
-        respSchema = fromMaybe (vResponseError "no schema for that response") $
-            derefResp ^? OA.content . at contentType . _Just . OA.schema . _Just
+        resp = deref openApi OA.responses $
+            fromMaybe (vResponseError $ "no response for that status code") $ asum
+                [ operation ^. OA.responses . at status
+                , operation ^. OA.responses . OA.default_
+                ]
+        respForContentType = fromMaybe (vResponseError "no content type for that response") $
+            resp ^? OA.content . at contentType . _Just
+        respSchema = fromMaybe (vResponseError "no schema for that content type") $
+            respForContentType ^? OA.schema . _Just
         validateRespSchema =
             if contentTypeIsJson contentType
-            then validateJsonDocument vResponseError (configuredApiDefinition vc) respSchema body
+            then validateJsonDocument vResponseError openApi respSchema body
             else ()
         in
             validateRespSchema
@@ -246,7 +287,7 @@ operationForMethod _ = const Nothing
 
 getContentType :: [Header] -> MediaType
 getContentType headers =
-    fromMaybe "application/json;charset=utf-8" $ 
+    fromMaybe "application/json;charset=utf-8" $
         fromString . S8.unpack <$> lookup hContentType headers
 
 getPathItem :: ApiDefinition -> FilePath -> Maybe OA.PathItem
@@ -254,14 +295,13 @@ getPathItem apiDef realPath = do
     definedPath <- lookupDefinedPath realPath $ getPathMap apiDef
     getOpenApi apiDef ^? OA.paths . at definedPath . _Just
 
-validateJsonDocument :: (forall a. String -> a) -> ApiDefinition -> OA.Referenced OA.Schema -> L.ByteString -> ()
-validateJsonDocument err apiDef bodySchema dataJson =
+validateJsonDocument :: (forall a. String -> a) -> OA.OpenApi -> OA.Referenced OA.Schema -> L.ByteString -> ()
+validateJsonDocument err openApi bodySchema dataJson =
   case errors of
     [] -> ()
     _ -> err $ unlines errors
   where
     decoded = fromMaybe (err "The document is not valid JSON") $ Aeson.decode dataJson
-    openApi = getOpenApi apiDef
     allSchemas = openApi ^. OA.components . OA.schemas
     dereferencedSchema = OA.dereference allSchemas bodySchema
     errors = map fixValidationError $ OA.validateJSON allSchemas dereferencedSchema decoded

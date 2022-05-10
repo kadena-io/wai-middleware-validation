@@ -13,7 +13,7 @@ import Data.String.Here                           (here)
 import Network.HTTP.Types                         (StdMethod (GET, POST, PUT))
 import Test.Hspec
 
-import Network.Wai.Middleware.Validation.Internal
+import Network.Wai.Middleware.Validation
 
 openApiJson :: OpenApi
 openApiJson = fromJust $ decode $ [here|
