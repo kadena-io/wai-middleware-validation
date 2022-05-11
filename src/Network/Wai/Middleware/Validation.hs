@@ -28,7 +28,6 @@ import qualified Data.ByteString as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
-import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Foldable
 import Data.HashMap.Strict.InsOrd (keys)
 import Data.IORef                                 (atomicModifyIORef, newIORef, readIORef)
@@ -101,14 +100,14 @@ emptyPathMap = PathMap Nothing Nothing M.empty
 insertPathMap :: PathMap -> FilePath -> PathMap
 insertPathMap pm path = go (splitDirectories path) pm
   where
-    go [] pm = case _pathHere pm of
-        Nothing -> pm { _pathHere = Just path }
+    go [] this = case _pathHere this of
+        Nothing -> this { _pathHere = Just path }
         Just path' -> error $ "path conflict between " <> path <> " and " <> path'
-    go (p:ps) pm
+    go (p:ps) this
         | not (null p) && head p == '{' && last p == '}'
-            = pm & pathCapture %~ Just . go ps . fromMaybe emptyPathMap
+            = this & pathCapture %~ Just . go ps . fromMaybe emptyPathMap
         | otherwise
-            = pm & pathSubdirs . at p %~ Just . go ps . fromMaybe emptyPathMap
+            = this & pathSubdirs . at p %~ Just . go ps . fromMaybe emptyPathMap
 
 makePathMap :: [FilePath] -> PathMap
 makePathMap = foldl' insertPathMap emptyPathMap
@@ -116,10 +115,10 @@ makePathMap = foldl' insertPathMap emptyPathMap
 lookupDefinedPath :: FilePath -> PathMap -> Maybe FilePath
 lookupDefinedPath path pm = go (splitDirectories path) pm
   where
-    go [] pm = _pathHere pm
-    go (p:ps) pm = asum
-        [ go ps =<< M.lookup p (_pathSubdirs pm)
-        , go ps =<< _pathCapture pm
+    go [] this = _pathHere this
+    go (p:ps) this = asum
+        [ go ps =<< M.lookup p (_pathSubdirs this)
+        , go ps =<< _pathCapture this
         ]
 
 toApiDefinition :: OA.OpenApi -> ApiDefinition
@@ -137,6 +136,7 @@ mkValidator log pathPrefix openApi =
   where
     mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi) log
 
+contentTypeIsJson :: MediaType -> Bool
 contentTypeIsJson contentType =
     mainType contentType == "application" && subType contentType == "json"
 
@@ -183,13 +183,13 @@ requestValidator vc app req sendResponse = do
                         else vRequestError $ unwords ["empty value for query parameter", S8.unpack k, "is not allowed"]
                     Just value -> let
                         schema = fromMaybe (paramError "no schema specified for this parameter") (OA._paramSchema param)
-                        addQuotes v =
-                            if not (S8.null v) && S8.head v == '\"'
-                            then v
-                            else "\"" <> v <> "\""
+                        addQuotes =
+                            if not (S8.null value) && S8.head value == '\"'
+                            then value
+                            else "\"" <> value <> "\""
                         value' =
                             if OA._schemaType (deref openApi OA.schemas schema) == Just OA.OpenApiString
-                            then addQuotes value
+                            then addQuotes
                             else value
                         in
                             validateJsonDocument paramError openApi schema (L.fromStrict value')
@@ -213,25 +213,30 @@ responseValidator vc app req sendResponse = app req $ \res -> do
         status = statusCode $ Wai.responseStatus res
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $
             parseMethod $ Wai.requestMethod req
-        path = fromMaybe (vResponseError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
-            fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
+        rawPath = Wai.rawPathInfo req
+        path = fromMaybe (vResponseError $ "specified path prefix is not a prefix of this path. prefix: " <> S8.unpack (configuredPathPrefix vc)) $
+            fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) rawPath
         contentType = getContentType (Wai.responseHeaders res)
-        pathItem = fromMaybe (vResponseError $ "no such path: " <> path) $
+        pathItem = fromMaybe (vResponseError "no such path in the spec") $
             getPathItem (configuredApiDefinition vc) path
-        operation = fromMaybe (vResponseError $ "no such method for that path") $
+        methods = [DELETE, GET, PATCH, POST, PUT]
+        legalMethods = filter (\s -> isJust (operationForMethod s pathItem)) methods
+        operation = fromMaybe (vResponseError $ "no such method for that path; legal methods are " <> show legalMethods) $
             operationForMethod method pathItem
+        legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
         resp = deref openApi OA.responses $
-            fromMaybe (vResponseError $ "no response for that status code") $ asum
+            fromMaybe (vResponseError $ "no response for that status code; legal status codes are " <> show legalStatusCodes) $ asum
                 [ operation ^. OA.responses . at status
                 , operation ^. OA.responses . OA.default_
                 ]
-        respForContentType = fromMaybe (vResponseError "no content type for that response") $
+        legalContentTypes = resp ^. OA.content . to keys
+        content = fromMaybe (vResponseError $ "no content type for that response; legal content types are " <> show legalContentTypes) $
             resp ^? OA.content . at contentType . _Just
-        respSchema = fromMaybe (vResponseError "no schema for that content type") $
-            respForContentType ^? OA.schema . _Just
+        schema = fromMaybe (vResponseError "no schema for that content") $
+            content ^? OA.schema . _Just
         validateRespSchema =
             if contentTypeIsJson contentType
-            then validateJsonDocument vResponseError openApi respSchema body
+            then validateJsonDocument vResponseError openApi schema body
             else ()
         in
             validateRespSchema
