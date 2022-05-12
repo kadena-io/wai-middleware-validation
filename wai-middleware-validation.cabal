@@ -20,9 +20,10 @@ library
   build-depends:       base >= 4.7 && < 5
                      , aeson
                      , bytestring
+                     , case-insensitive
                      , containers
                      , filepath
-                     , http-media
+                     , http-media >= 0.8
                      , http-types
                      , insert-ordered-containers
                      , lens

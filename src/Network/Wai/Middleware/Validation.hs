@@ -7,6 +7,7 @@
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE GADTs      #-}
 {-# LANGUAGE TemplateHaskell      #-}
+{-# LANGUAGE LambdaCase      #-}
 
 module Network.Wai.Middleware.Validation
     ( mkValidator
@@ -24,10 +25,13 @@ import Control.Exception
 import Control.Lens hiding ((.=))
 import qualified Data.Aeson as Aeson
 import Data.Align
+import Data.ByteString(ByteString)
 import qualified Data.ByteString as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
+import Data.CaseInsensitive(CI)
+import qualified Data.CaseInsensitive as CI
 import Data.Foldable
 import Data.HashMap.Strict.InsOrd (keys)
 import Data.IORef                                 (atomicModifyIORef, newIORef, readIORef)
@@ -137,8 +141,24 @@ mkValidator log pathPrefix openApi =
     mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi) log
 
 contentTypeIsJson :: MediaType -> Bool
-contentTypeIsJson contentType =
-    mainType contentType == "application" && subType contentType == "json"
+contentTypeIsJson ty =
+    mainType ty == "application" && subType ty == "json"
+
+params :: Lens' MediaType (M.Map (CI ByteString) (CI ByteString))
+params f ty =
+    let
+        ps = parameters ty
+        mt = mainType ty
+        st = subType ty
+    in f ps <&> \ps' ->
+        M.foldlWithKey' (\ty' pk pv -> ty' /: (CI.original pk, CI.original pv)) (CI.original mt // CI.original st) ps'
+
+stripCharsetUtf8 :: MediaType -> MediaType
+stripCharsetUtf8 ty
+    | contentTypeIsJson ty = ty & params . at "charset" %~ \case
+        Just "utf-8" -> Nothing
+        v -> v
+    | otherwise = ty
 
 deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
 deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
@@ -152,7 +172,7 @@ requestValidator vc app req sendResponse = do
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
         path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
             fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-        contentType = getContentType (Wai.requestHeaders req)
+        contentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
         pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
             getPathItem (configuredApiDefinition vc) path
         operation = fromMaybe (vRequestError $ "no such method for that path") $
@@ -216,7 +236,7 @@ responseValidator vc app req sendResponse = app req $ \res -> do
         rawPath = Wai.rawPathInfo req
         path = fromMaybe (vResponseError $ "specified path prefix is not a prefix of this path. prefix: " <> S8.unpack (configuredPathPrefix vc)) $
             fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) rawPath
-        contentType = getContentType (Wai.responseHeaders res)
+        contentType = stripCharsetUtf8 $ getContentType (Wai.responseHeaders res)
         pathItem = fromMaybe (vResponseError "no such path in the spec") $
             getPathItem (configuredApiDefinition vc) path
         methods = [DELETE, GET, PATCH, POST, PUT]
