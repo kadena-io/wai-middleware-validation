@@ -29,6 +29,7 @@ library
                      , lens
                      , openapi3
                      , parallel
+                     , safe-exceptions
                      , semialign
                      , text
                      , these

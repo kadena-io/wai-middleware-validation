@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -Wno-deprecations #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections     #-}
@@ -22,6 +23,7 @@ module Network.Wai.Middleware.Validation
     where
 
 import Control.Exception
+import qualified Control.Exception.Safe as Safe
 import Control.Lens hiding ((.=))
 import qualified Data.Aeson as Aeson
 import Data.Align
@@ -153,6 +155,10 @@ params f ty =
     in f ps <&> \ps' ->
         M.foldlWithKey' (\ty' pk pv -> ty' /: (CI.original pk, CI.original pv)) (CI.original mt // CI.original st) ps'
 
+-- the default charset for application/json is utf-8 per the spec, so the MIME types
+-- application/json and application/json;charset=utf-8 are identical. we look things
+-- up in the spec by content type, so this normalization lets us avoid duplicating
+-- entries for the two MIME types.
 stripCharsetUtf8 :: MediaType -> MediaType
 stripCharsetUtf8 ty
     | contentTypeIsJson ty = ty & params . at "charset" %~ \case
@@ -163,11 +169,18 @@ stripCharsetUtf8 ty
 deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
 deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
 
+catchErrors :: ValidatorConfiguration -> Wai.Request -> Maybe Wai.Response -> IO () -> IO ()
+catchErrors vc req res act =
+    act `Safe.catches`
+        [ Safe.Handler $ runLog (configuredLog vc) req res
+        , Safe.Handler $ \(ex :: SomeException) -> runLog (configuredLog vc) req res $ ValidationException ResponseError ("unexpected error: " <> show ex)
+        ]
+
 requestValidator :: ValidatorConfiguration -> Wai.Middleware
 requestValidator vc app req sendResponse = do
     (body, newReq) <- getRequestBody req
 
-    handle (runLog (configuredLog vc) req Nothing) $ evaluate $ let
+    catchErrors vc req Nothing $ evaluate $ let
         openApi = getOpenApi $ configuredApiDefinition vc
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
         path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
@@ -228,7 +241,7 @@ responseValidator :: ValidatorConfiguration -> Wai.Middleware
 responseValidator vc app req sendResponse = app req $ \res -> do
     body <- getResponseBody res
 
-    handle (runLog (configuredLog vc) req (Just res)) $ evaluate $ let
+    catchErrors vc req (Just res) $ evaluate $ let
         openApi = getOpenApi $ configuredApiDefinition vc
         status = statusCode $ Wai.responseStatus res
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $
