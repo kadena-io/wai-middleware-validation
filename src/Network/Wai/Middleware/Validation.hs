@@ -272,7 +272,10 @@ responseValidator vc app req sendResponse = app req $ \res -> do
             content ^? OA.schema . _Just
         validateRespSchema =
             if contentTypeIsJson contentType
-            then validateJsonDocument vResponseError openApi schema body
+            then
+                if null (resp ^? OA.content) || not (L.null body)
+                then validateJsonDocument vResponseError openApi schema body
+                else ()
             else ()
         in
             validateRespSchema
