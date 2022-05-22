@@ -19,8 +19,6 @@ module Network.Wai.Middleware.Validation
     -- , validateRequestBody
     -- , validateResponseBody
     , toApiDefinition
-    , getRequestBody
-    , getResponseBody
     )
     where
 
@@ -70,7 +68,7 @@ instance Show ValidationException where
 
 instance Exception ValidationException
 
-newtype Log = Log { runLog :: Wai.Request -> Maybe Wai.Response -> ValidationException -> IO () }
+newtype Log = Log { runLog :: (Maybe L.ByteString, Wai.Request) -> Maybe (L.ByteString, Wai.Response) -> ValidationException -> IO () }
 
 vRequestError :: String -> a
 vRequestError = throw . ValidationException RequestError
@@ -171,7 +169,7 @@ stripCharsetUtf8 ty
 deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
 deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
 
-catchErrors :: ValidatorConfiguration -> Wai.Request -> Maybe Wai.Response -> IO () -> IO ()
+catchErrors :: ValidatorConfiguration -> (Maybe L.ByteString, Wai.Request) -> Maybe (L.ByteString, Wai.Response) -> IO () -> IO ()
 catchErrors vc req res act =
     act `Safe.catches`
         [ Safe.Handler $ runLog (configuredLog vc) req res
@@ -182,7 +180,7 @@ requestValidator :: ValidatorConfiguration -> Wai.Middleware
 requestValidator vc app req sendResponse = do
     (body, newReq) <- getRequestBody req
 
-    catchErrors vc req Nothing $ evaluate $ let
+    catchErrors vc (Just body, req) Nothing $ evaluate $ let
         openApi = getOpenApi $ configuredApiDefinition vc
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
         path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
@@ -246,7 +244,7 @@ responseValidator :: ValidatorConfiguration -> Wai.Middleware
 responseValidator vc app req sendResponse = app req $ \res -> do
     body <- getResponseBody res
 
-    catchErrors vc req (Just res) $ evaluate $ let
+    catchErrors vc (Nothing, req) (Just (body, res)) $ evaluate $ let
         openApi = getOpenApi $ configuredApiDefinition vc
         status = statusCode $ Wai.responseStatus res
         method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $
