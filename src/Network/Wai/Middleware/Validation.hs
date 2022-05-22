@@ -19,6 +19,8 @@ module Network.Wai.Middleware.Validation
     -- , validateRequestBody
     -- , validateResponseBody
     , toApiDefinition
+    , getRequestBody
+    , getResponseBody
     )
     where
 
@@ -196,8 +198,8 @@ requestValidator vc app req sendResponse = do
         reqSchema = fromMaybe (vRequestError $ "no schema for that request") $
             reqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
         validateReqSchema =
-            if elem method [POST, PUT] && contentTypeIsJson contentType then
-                validateJsonDocument vRequestError openApi reqSchema body
+            if elem method [POST, PUT] && contentTypeIsJson contentType
+            then validateJsonDocument vRequestError openApi reqSchema body
             else ()
         pathItemParams = deref openApi OA.parameters <$> operation ^. OA.parameters
         expectedQueryParams = [ (T.encodeUtf8 $ OA._paramName p, p) | p <- pathItemParams, OA._paramIn p == OA.ParamQuery ]
