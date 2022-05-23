@@ -22,6 +22,7 @@ module Network.Wai.Middleware.Validation
     )
     where
 
+import Control.Applicative
 import Control.Exception
 import qualified Control.Exception.Safe as Safe
 import Control.Lens hiding ((.=))
@@ -199,6 +200,16 @@ also a b = unsafeDupablePerformIO $ do
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
+orElse :: a -> a -> a
+orElse a b = unsafeDupablePerformIO $ do
+    a' <- try' (evaluate a)
+    case a' of
+        Left ae -> evaluate b
+        Right ar -> return ar
+    where
+    try' :: IO a -> IO (Either ValidationException a)
+    try' = try
+
 operationForRequest :: (forall a. String -> a) -> ValidatorConfiguration -> StdMethod -> ByteString -> OA.Operation
 operationForRequest err vc method rawPath = operation
     where
@@ -228,10 +239,15 @@ requestValidator vc app req sendResponse = do
             if elem method [POST, PUT] && contentTypeIsJson contentType && (isJust (operation ^. OA.requestBody) || not (L.null body))
             then validateJsonDocument vRequestError openApi reqSchema body
             else ()
-        pathItemParams = deref openApi OA.parameters <$> operation ^. OA.parameters
-        expectedQueryParams = [ (T.encodeUtf8 $ OA._paramName p, p) | p <- pathItemParams, OA._paramIn p == OA.ParamQuery ]
+        expectedQueryParams =
+            [ (T.encodeUtf8 $ OA._paramName dp, dp)
+            | p <- operation ^. OA.parameters
+            , let dp = deref openApi OA.parameters p
+            -- TODO: validate parameters not in the query
+            , OA._paramIn dp == OA.ParamQuery
+            ]
         paramError k e =
-            vRequestError $ unwords [ "error validating query parameter", S8.unpack k, "-", e ]
+            vRequestError $ unwords [ "error validating query parameter", S8.unpack k, ":", e ]
         validateQueryParams = let
             checkQueryParam k v = case v of
                 This _ -> paramError k "this parameter is not specified"
@@ -244,20 +260,20 @@ requestValidator vc app req sendResponse = do
                 These maybeValue param -> case maybeValue of
                     Nothing ->
                         if fromMaybe False $ OA._paramAllowEmptyValue param then ()
-                        else vRequestError $ unwords ["empty value for query parameter", S8.unpack k, "is not allowed"]
+                        else paramError k $ unwords ["an empty value for this query parameter is not allowed"]
                     Just value -> let
-                        schema = fromMaybe (paramError k "no schema specified for this parameter") (OA._paramSchema param)
-                        addQuotes =
-                            if not (S8.null value) && S8.head value == '\"'
-                            then value
-                            else "\"" <> value <> "\""
-                        value' =
-                            if OA._schemaType (deref openApi OA.schemas schema) == Just OA.OpenApiString
-                            then addQuotes
-                            else value
+                        paramSchema = fromMaybe (paramError k "no schema specified for this parameter") $
+                            OA._paramSchema param
+                        validateRaw =
+                            validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict value)
+                        validateQuoted =
+                            validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
                         in
-                            validateJsonDocument (paramError k) openApi schema (L.fromStrict value')
-              where
+                            -- query parameters are usually not valid JSON
+                            -- because they lack quotes, so we add them in if
+                            -- necessary, though we strip them out again if both
+                            -- fail for a better error message.
+                            foldr orElse () [validateRaw, validateQuoted, validateRaw]
             in
                 M.foldr also () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
         in
