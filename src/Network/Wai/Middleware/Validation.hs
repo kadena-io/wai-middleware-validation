@@ -48,6 +48,7 @@ import Network.HTTP.Media.MediaType
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
 import System.FilePath (splitDirectories)
+import System.IO.Unsafe (unsafeDupablePerformIO)
 import Debug.Trace
 
 import qualified Data.OpenApi as OA
@@ -57,24 +58,31 @@ import qualified Data.OpenApi.Schema.Generator as OA
 data ErrorProvenance
     = RequestError
     | ResponseError
+    deriving Show
 
 data ValidationException
-    = ValidationException !ErrorProvenance String
+    = ValidationException [(ErrorProvenance, String)]
     deriving (Typeable)
 
+instance Semigroup ValidationException where
+    ValidationException errs <> ValidationException errs' =
+        ValidationException (errs <> errs')
+
 instance Show ValidationException where
-    show (ValidationException RequestError msg) = "Request invalid: " <> msg
-    show (ValidationException ResponseError msg) = "Response invalid: " <> msg
+    show (ValidationException errs) = unlines $
+        [ show p <> ": " <> err
+        | (p, err) <- errs
+        ]
 
 instance Exception ValidationException
 
 newtype Log = Log { runLog :: (Maybe L.ByteString, Wai.Request) -> Maybe (L.ByteString, Wai.Response) -> ValidationException -> IO () }
 
 vRequestError :: String -> a
-vRequestError = throw . ValidationException RequestError
+vRequestError e = throw $ ValidationException [(RequestError, e)]
 
 vResponseError :: String -> a
-vResponseError = throw . ValidationException ResponseError
+vResponseError e = throw $ ValidationException [(ResponseError, e)]
 
 data ValidatorConfiguration = ValidatorConfiguration
     { configuredPathPrefix :: !BS.ByteString
@@ -175,8 +183,21 @@ catchErrors :: ValidatorConfiguration -> (Maybe L.ByteString, Wai.Request) -> Ma
 catchErrors vc req res act =
     act `Safe.catches`
         [ Safe.Handler $ runLog (configuredLog vc) req res
-        , Safe.Handler $ \(ex :: SomeException) -> runLog (configuredLog vc) req res $ ValidationException ResponseError ("unexpected error: " <> show ex)
+        , Safe.Handler $ \(ex :: SomeException) -> runLog (configuredLog vc) req res $ ValidationException [(ResponseError, "unexpected error: " <> show ex)]
         ]
+
+also :: () -> () -> ()
+also a b = unsafeDupablePerformIO $ do
+    a' <- try' (evaluate a)
+    b' <- try' (evaluate b)
+    case (a', b') of
+        (Left ae, Left be) -> throwIO (ae <> be)
+        (Left ae, _) -> throwIO ae
+        (_, Left be) -> throwIO be
+        (Right (), Right ()) -> return ()
+    where
+    try' :: IO a -> IO (Either ValidationException a)
+    try' = try
 
 operationForRequest :: (forall a. String -> a) -> ValidatorConfiguration -> StdMethod -> ByteString -> OA.Operation
 operationForRequest err vc method rawPath = operation
@@ -238,9 +259,9 @@ requestValidator vc app req sendResponse = do
                             validateJsonDocument (paramError k) openApi schema (L.fromStrict value')
               where
             in
-                M.foldl' seq () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
+                M.foldr also () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
         in
-            validateReqSchema `seq` validateQueryParams
+            validateReqSchema `also` validateQueryParams
 
     app newReq sendResponse
 
