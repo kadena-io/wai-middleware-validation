@@ -188,7 +188,9 @@ requestValidator vc app req sendResponse = do
         contentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
         pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
             getPathItem (configuredApiDefinition vc) path
-        operation = fromMaybe (vRequestError $ "no such method for that path") $
+        methods = [DELETE, GET, PATCH, POST, PUT]
+        legalMethods = filter (\s -> isJust (operationForMethod s pathItem)) methods
+        operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $
             operationForMethod method pathItem
         reqBody = deref openApi OA.requestBodies $
             fromMaybe (vRequestError $ "no request body for that method") $
