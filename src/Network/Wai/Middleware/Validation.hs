@@ -134,6 +134,8 @@ toApiDefinition openApi =
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
 -- TODO: check that the response content type is an accepted content type in the request (or something)
+-- TODO: allow invalid requests as long as the response is method not allowed, invalid request, or whichever is applicable
+-- TODO: allow HEAD on GET endpoints, with an empty request body schema
 
 -- | Make a middleware for Request/Response validation.
 mkValidator :: Log -> S8.ByteString -> OA.OpenApi -> Wai.Middleware
