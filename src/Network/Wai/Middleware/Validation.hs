@@ -15,8 +15,6 @@ module Network.Wai.Middleware.Validation
     , validatorMiddleware
     , Log(..)
     , ValidationException(..)
-    -- , validateRequestBody
-    -- , validateResponseBody
     , toApiDefinition
     )
     where
@@ -209,6 +207,20 @@ orElse a b = unsafeDupablePerformIO $ do
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
+orElseTraced :: a -> b -> ()
+orElseTraced a b = unsafeDupablePerformIO $ do
+    a' <- try' (evaluate a)
+    case a' of
+        Left ae -> do
+            b' <- try' (evaluate b)
+            case b' of
+                Left be -> throwIO (ae <> be)
+                Right _ -> return ()
+        Right _ -> return ()
+    where
+    try' :: IO a -> IO (Either ValidationException a)
+    try' = try
+
 assertP :: ErrorProvenance -> String -> Bool -> ()
 assertP _ _ True = ()
 assertP prov msg False = throw $ ValidationException [(prov, msg)]
@@ -296,7 +308,7 @@ validatorMiddleware vc app req sendResponse = do
                 else ()
             maybeAcceptableMediaTypes =
                 fmap (stripCharsetUtf8 . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
-            validateContentTypeNegotiation = case maybeAcceptableMediaTypes of
+            validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
                 Nothing -> ()
                 Just acceptableMediaTypes ->
                     if null (acceptableMediaTypes `union` legalContentTypes)
@@ -304,10 +316,13 @@ validatorMiddleware vc app req sendResponse = do
                     else assertP CombinedError "server responded with an unacceptable content type" (elem respContentType acceptableMediaTypes)
             in
                 foldr seq ()
-                    [ pathItem `orElse` assertP CombinedError "path not found but there was no 404 response" (status == 404)
-                    , operation `orElse` assertP CombinedError "method not found but there was no 405 response" (status == 405)
-                    , validateContentTypeNegotiation
-                    , validateReqSchema `also` validateQueryParams `also` validateRespSchema
+                    [ pathItem `orElseTraced`
+                        assertP CombinedError "path not found but there was no 404 response" (status == 404)
+                    , operation `orElseTraced`
+                        assertP CombinedError "method not found but there was no 405 response" (status == 405)
+                    , validateResponseContentTypeNegotiation
+                    , (validateReqSchema `also` validateQueryParams `also` validateRespSchema) `orElseTraced`
+                        assertP CombinedError "invalid request body or query params but there was no 400 response" (status == 400)
                     ]
 
 
@@ -332,25 +347,6 @@ getResponseBody res = do
             (pure ())
         toLazyByteString <$> readIORef ref
 
---
--- for non-middleware use
---
-
-{-
-validateRequestBody :: RequestHeaders -> StdMethod -> FilePath -> OpenApi -> L.ByteString -> ()
-validateRequestBody rhs method path (toApiDefinition -> apiDef) body =
-    case getContentType rhs of
-        Nothing -> vRequestError "no content type"
-        Just contentType | bodySchema <- requestSchema apiDef path contentType method -> validateJsonDocument vRequestError apiDef bodySchema body
-
-validateResponseBody :: ResponseHeaders -> StdMethod -> FilePath -> Int -> OpenApi -> L.ByteString -> ()
-validateResponseBody rhs method path statusCode' (toApiDefinition -> apiDef) body =
-    case getContentType rhs of
-        Nothing -> vResponseError "no content type"
-        Just contentType | bodySchema <- responseSchema apiDef path contentType method statusCode' ->
-            validateJsonDocument vResponseError apiDef bodySchema body
--}
-
 -- internals
 
 operationForMethod :: StdMethod -> OA.PathItem -> Maybe OA.Operation
@@ -363,7 +359,7 @@ operationForMethod _ = const Nothing
 
 getContentType :: [Header] -> MediaType
 getContentType headers =
-    fromMaybe "application/json;charset=utf-8" $
+    fromMaybe "application/json" $
         fromString . S8.unpack <$> lookup hContentType headers
 
 getPathItem :: ApiDefinition -> FilePath -> Maybe OA.PathItem
