@@ -36,6 +36,7 @@ import qualified Data.CaseInsensitive as CI
 import Data.Foldable
 import Data.HashMap.Strict.InsOrd (keys)
 import Data.IORef                                 (atomicModifyIORef, newIORef, readIORef)
+import Data.List
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.String
@@ -141,7 +142,6 @@ toApiDefinition openApi =
   where
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
--- TODO: check that the response content type is an accepted content type in the request (or something)
 -- TODO: allow invalid requests as long as the response is method not allowed, invalid request, or whichever is applicable
 -- TODO: allow HEAD on GET endpoints, with an empty request body schema
 
@@ -294,10 +294,19 @@ validatorMiddleware vc app req sendResponse = do
                 if contentTypeIsJson respContentType && (null (specResp ^? OA.content) || not (L.null respBody))
                 then validateJsonDocument (\e -> vResponseError ("error validating response body: " <> e)) openApi schema respBody
                 else ()
+            maybeAcceptableMediaTypes =
+                fmap (stripCharsetUtf8 . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
+            validateContentTypeNegotiation = case maybeAcceptableMediaTypes of
+                Nothing -> ()
+                Just acceptableMediaTypes ->
+                    if null (acceptableMediaTypes `union` legalContentTypes)
+                    then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406)
+                    else assertP CombinedError "server responded with an unacceptable content type" (elem respContentType acceptableMediaTypes)
             in
                 foldr seq ()
                     [ pathItem `orElse` assertP CombinedError "path not found but there was no 404 response" (status == 404)
                     , operation `orElse` assertP CombinedError "method not found but there was no 405 response" (status == 405)
+                    , validateContentTypeNegotiation
                     , validateReqSchema `also` validateQueryParams `also` validateRespSchema
                     ]
 
