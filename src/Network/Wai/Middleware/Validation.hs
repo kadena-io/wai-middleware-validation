@@ -237,7 +237,7 @@ validatorMiddleware vc app req sendResponse = do
                 specReqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
             validateReqSchema =
                 if elem method [POST, PUT] && contentTypeIsJson contentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
-                then validateJsonDocument vRequestError openApi reqSchema reqBody
+                then validateJsonDocument (\e -> vRequestError ("error validating request body: " <> e)) openApi reqSchema reqBody
                 else ()
             expectedQueryParams =
                 [ (T.encodeUtf8 $ OA._paramName dp, dp)
@@ -291,7 +291,7 @@ validatorMiddleware vc app req sendResponse = do
                 content ^? OA.schema . _Just
             validateRespSchema =
                 if contentTypeIsJson contentType && (null (specResp ^? OA.content) || not (L.null respBody))
-                then validateJsonDocument vResponseError openApi schema respBody
+                then validateJsonDocument (\e -> vResponseError ("error validating response body: " <> e)) openApi schema respBody
                 else ()
             in
                 foldr seq ()
