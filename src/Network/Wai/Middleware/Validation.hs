@@ -42,7 +42,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.These
 import Data.Typeable
-import Network.HTTP.Media.MediaType
+import Network.HTTP.Media
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
 import System.FilePath (splitDirectories)
@@ -313,7 +313,7 @@ validatorMiddleware vc app req sendResponse = do
                 Just acceptableMediaTypes ->
                     if null (acceptableMediaTypes `union` legalContentTypes)
                     then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406)
-                    else assertP CombinedError "server responded with an unacceptable content type" (elem respContentType acceptableMediaTypes)
+                    else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes)
             in
                 foldr seq ()
                     [ pathItem `orElseTraced`
