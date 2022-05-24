@@ -229,14 +229,15 @@ validatorMiddleware vc app req sendResponse = do
             legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
             operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $
                 operationForMethod method pathItem
-            contentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
+            reqContentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
+            respContentType = stripCharsetUtf8 $ getContentType (Wai.responseHeaders resp)
             specReqBody = deref openApi OA.requestBodies $
                 fromMaybe (vRequestError $ "no request body for that method") $
                 operation ^. OA.requestBody
             reqSchema = fromMaybe (vRequestError $ "no schema for that request") $
-                specReqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
+                specReqBody ^? OA.content . at reqContentType . _Just . OA.schema . _Just
             validateReqSchema =
-                if elem method [POST, PUT] && contentTypeIsJson contentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
+                if elem method [POST, PUT] && contentTypeIsJson reqContentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
                 then validateJsonDocument (\e -> vRequestError ("error validating request body: " <> e)) openApi reqSchema reqBody
                 else ()
             expectedQueryParams =
@@ -286,11 +287,11 @@ validatorMiddleware vc app req sendResponse = do
             legalContentTypes = specResp ^. OA.content . to keys
 
             content = fromMaybe (vResponseError $ "no content type for that response; legal content types are " <> show legalContentTypes) $
-                specResp ^? OA.content . at contentType . _Just
+                specResp ^? OA.content . at respContentType . _Just
             schema = fromMaybe (vResponseError "no schema for that content") $
                 content ^? OA.schema . _Just
             validateRespSchema =
-                if contentTypeIsJson contentType && (null (specResp ^? OA.content) || not (L.null respBody))
+                if contentTypeIsJson respContentType && (null (specResp ^? OA.content) || not (L.null respBody))
                 then validateJsonDocument (\e -> vResponseError ("error validating response body: " <> e)) openApi schema respBody
                 else ()
             in
