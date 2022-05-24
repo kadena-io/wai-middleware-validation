@@ -12,8 +12,7 @@
 
 module Network.Wai.Middleware.Validation
     ( mkValidator
-    , requestValidator
-    , responseValidator
+    , validatorMiddleware
     , Log(..)
     , ValidationException(..)
     -- , validateRequestBody
@@ -149,7 +148,7 @@ toApiDefinition openApi =
 -- | Make a middleware for Request/Response validation.
 mkValidator :: Log -> S8.ByteString -> OA.OpenApi -> Wai.Middleware
 mkValidator lg pathPrefix openApi =
-    responseValidator mValidatorConfig . requestValidator mValidatorConfig
+    validatorMiddleware mValidatorConfig
   where
     mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi) lg
 
@@ -221,94 +220,84 @@ operationForRequest err vc method rawPath = operation
     operation = fromMaybe (err $ "no such method for that path; legal methods are " <> show legalMethods) $
         operationForMethod method pathItem
 
-requestValidator :: ValidatorConfiguration -> Wai.Middleware
-requestValidator vc app req sendResponse = do
-    (body, newReq) <- getRequestBody req
+validatorMiddleware :: ValidatorConfiguration -> Wai.Middleware
+validatorMiddleware vc app req sendResponse = do
+    (reqBody, newReq) <- getRequestBody req
+    app newReq $ \resp -> do
+        respBody <- getResponseBody resp
 
-    catchErrors vc (Just body, req) Nothing $ evaluate $ let
-        openApi = getOpenApi $ configuredApiDefinition vc
-        method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
-        operation = operationForRequest vRequestError vc method (Wai.rawPathInfo req)
-        contentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
-        reqBody = deref openApi OA.requestBodies $
-            fromMaybe (vRequestError $ "no request body for that method") $
-            operation ^. OA.requestBody
-        reqSchema = fromMaybe (vRequestError $ "no schema for that request") $
-            reqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
-        validateReqSchema =
-            if elem method [POST, PUT] && contentTypeIsJson contentType && (isJust (operation ^. OA.requestBody) || not (L.null body))
-            then validateJsonDocument vRequestError openApi reqSchema body
-            else ()
-        expectedQueryParams =
-            [ (T.encodeUtf8 $ OA._paramName dp, dp)
-            | p <- operation ^. OA.parameters
-            , let dp = deref openApi OA.parameters p
-            -- TODO: validate parameters not in the query
-            , OA._paramIn dp == OA.ParamQuery
-            ]
-        paramError k e =
-            vRequestError $ unwords [ "error validating query parameter", S8.unpack k, ":", e ]
-        validateQueryParams = let
-            checkQueryParam k v = case v of
-                This _ -> paramError k "this parameter is not specified"
-                That p ->
-                    -- per https://swagger.io/docs/specification/describing-parameters/ section "Required and Optional Parameters",
-                    -- parameters are not required by default
-                    if fromMaybe False (OA._paramRequired p)
-                    then paramError k "this parameter is required and not present"
-                    else ()
-                These maybeValue param -> case maybeValue of
-                    Nothing ->
-                        if fromMaybe False $ OA._paramAllowEmptyValue param then ()
-                        else paramError k $ unwords ["an empty value for this query parameter is not allowed"]
-                    Just value -> let
-                        paramSchema = fromMaybe (paramError k "no schema specified for this parameter") $
-                            OA._paramSchema param
-                        validateRaw =
-                            validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict value)
-                        validateQuoted =
-                            validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
-                        in
-                            -- query parameters are usually not valid JSON
-                            -- because they lack quotes, so we add them in if
-                            -- necessary, though we strip them out again if both
-                            -- fail for a better error message.
-                            foldr orElse () [validateRaw, validateQuoted, validateRaw]
-            in
-                M.foldr also () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
-        in
-            validateReqSchema `also` validateQueryParams
-
-    app newReq sendResponse
-
-responseValidator :: ValidatorConfiguration -> Wai.Middleware
-responseValidator vc app req sendResponse = app req $ \res -> do
-    body <- getResponseBody res
-
-    catchErrors vc (Nothing, req) (Just (body, res)) $ evaluate $ let
-        openApi = getOpenApi $ configuredApiDefinition vc
-        status = statusCode $ Wai.responseStatus res
-        method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
-        operation = operationForRequest vResponseError vc method (Wai.rawPathInfo req)
-        contentType = stripCharsetUtf8 $ getContentType (Wai.responseHeaders res)
-        legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
-        resp = deref openApi OA.responses $
-            fromMaybe (vResponseError $ "no response for that status code; legal status codes are " <> show legalStatusCodes) $ asum
-                [ operation ^. OA.responses . at status
-                , operation ^. OA.responses . OA.default_
+        catchErrors vc (Just reqBody, req) (Just (respBody, resp)) $ evaluate $ let
+            openApi = getOpenApi $ configuredApiDefinition vc
+            method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
+            operation = operationForRequest vRequestError vc method (Wai.rawPathInfo req)
+            contentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
+            specReqBody = deref openApi OA.requestBodies $
+                fromMaybe (vRequestError $ "no request body for that method") $
+                operation ^. OA.requestBody
+            reqSchema = fromMaybe (vRequestError $ "no schema for that request") $
+                specReqBody ^? OA.content . at contentType . _Just . OA.schema . _Just
+            validateReqSchema =
+                if elem method [POST, PUT] && contentTypeIsJson contentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
+                then validateJsonDocument vRequestError openApi reqSchema reqBody
+                else ()
+            expectedQueryParams =
+                [ (T.encodeUtf8 $ OA._paramName dp, dp)
+                | p <- operation ^. OA.parameters
+                , let dp = deref openApi OA.parameters p
+                -- TODO: validate parameters not in the query
+                , OA._paramIn dp == OA.ParamQuery
                 ]
-        legalContentTypes = resp ^. OA.content . to keys
-        content = fromMaybe (vResponseError $ "no content type for that response; legal content types are " <> show legalContentTypes) $
-            resp ^? OA.content . at contentType . _Just
-        schema = fromMaybe (vResponseError "no schema for that content") $
-            content ^? OA.schema . _Just
-        validateRespSchema =
-            if contentTypeIsJson contentType && (null (resp ^? OA.content) || not (L.null body))
-            then validateJsonDocument vResponseError openApi schema body
-            else ()
-        in
-            validateRespSchema
-    sendResponse res
+            paramError k e =
+                vRequestError $ unwords [ "error validating query parameter", S8.unpack k, ":", e ]
+            validateQueryParams = let
+                checkQueryParam k v = case v of
+                    This _ -> paramError k "this parameter is not specified"
+                    That p ->
+                        -- per https://swagger.io/docs/specification/describing-parameters/ section "Required and Optional Parameters",
+                        -- parameters are not required by default
+                        if fromMaybe False (OA._paramRequired p)
+                        then paramError k "this parameter is required and not present"
+                        else ()
+                    These maybeValue param -> case maybeValue of
+                        Nothing ->
+                            if fromMaybe False $ OA._paramAllowEmptyValue param then ()
+                            else paramError k $ unwords ["an empty value for this query parameter is not allowed"]
+                        Just value -> let
+                            paramSchema = fromMaybe (paramError k "no schema specified for this parameter") $
+                                OA._paramSchema param
+                            validateRaw =
+                                validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict value)
+                            validateQuoted =
+                                validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
+                            in
+                                -- query parameters are usually not valid JSON
+                                -- because they lack quotes, so we add them in if
+                                -- necessary, though we strip them out again if both
+                                -- fail for a better error message.
+                                foldr orElse () [validateRaw, validateQuoted, validateRaw]
+                in
+                    M.foldr also () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
+            status = statusCode $ Wai.responseStatus resp
+            legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
+            specResp = deref openApi OA.responses $
+                fromMaybe (vResponseError $ "no response for that status code; legal status codes are " <> show legalStatusCodes) $ asum
+                    [ operation ^. OA.responses . at status
+                    , operation ^. OA.responses . OA.default_
+                    ]
+            legalContentTypes = specResp ^. OA.content . to keys
+
+            content = fromMaybe (vResponseError $ "no content type for that response; legal content types are " <> show legalContentTypes) $
+                specResp ^? OA.content . at contentType . _Just
+            schema = fromMaybe (vResponseError "no schema for that content") $
+                content ^? OA.schema . _Just
+            validateRespSchema =
+                if contentTypeIsJson contentType && (null (specResp ^? OA.content) || not (L.null respBody))
+                then validateJsonDocument vResponseError openApi schema respBody
+                else ()
+            in
+                validateReqSchema `also` validateQueryParams `also` validateRespSchema
+
+        sendResponse resp
 
 getRequestBody :: Wai.Request -> IO (L.ByteString, Wai.Request)
 getRequestBody req = do
