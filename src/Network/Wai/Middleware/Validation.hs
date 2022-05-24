@@ -21,7 +21,6 @@ module Network.Wai.Middleware.Validation
     )
     where
 
-import Control.Applicative
 import Control.Exception
 import qualified Control.Exception.Safe as Safe
 import Control.Lens hiding ((.=))
@@ -58,6 +57,7 @@ import qualified Data.OpenApi.Schema.Generator as OA
 data ErrorProvenance
     = RequestError
     | ResponseError
+    | CombinedError
     deriving Show
 
 data ValidationException
@@ -186,7 +186,7 @@ catchErrors vc req res act =
         , Safe.Handler $ \(ex :: SomeException) -> runLog (configuredLog vc) req res $ ValidationException [(ResponseError, "unexpected error: " <> show ex)]
         ]
 
-also :: () -> () -> ()
+also :: a -> b -> b
 also a b = unsafeDupablePerformIO $ do
     a' <- try' (evaluate a)
     b' <- try' (evaluate b)
@@ -194,31 +194,24 @@ also a b = unsafeDupablePerformIO $ do
         (Left ae, Left be) -> throwIO (ae <> be)
         (Left ae, _) -> throwIO ae
         (_, Left be) -> throwIO be
-        (Right (), Right ()) -> return ()
+        (Right _, Right br) -> return br
     where
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
-orElse :: a -> a -> a
+orElse :: a -> b -> ()
 orElse a b = unsafeDupablePerformIO $ do
     a' <- try' (evaluate a)
     case a' of
-        Left ae -> evaluate b
-        Right ar -> return ar
+        Left _ -> evaluate b >> return ()
+        Right _ -> return ()
     where
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
-operationForRequest :: (forall a. String -> a) -> ValidatorConfiguration -> StdMethod -> ByteString -> OA.Operation
-operationForRequest err vc method rawPath = operation
-    where
-    path = fromMaybe (err $ "path prefix not in path: " <> show rawPath) $
-        fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) rawPath
-    pathItem = fromMaybe (err $ "no such path: " <> path) $
-        getPathItem (configuredApiDefinition vc) path
-    legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
-    operation = fromMaybe (err $ "no such method for that path; legal methods are " <> show legalMethods) $
-        operationForMethod method pathItem
+assertP :: ErrorProvenance -> String -> Bool -> ()
+assertP _ _ True = ()
+assertP prov msg False = throw $ ValidationException [(prov, msg)]
 
 validatorMiddleware :: ValidatorConfiguration -> Wai.Middleware
 validatorMiddleware vc app req sendResponse = do
@@ -228,8 +221,14 @@ validatorMiddleware vc app req sendResponse = do
 
         catchErrors vc (Just reqBody, req) (Just (respBody, resp)) $ evaluate $ let
             openApi = getOpenApi $ configuredApiDefinition vc
-            method = either (\err -> vResponseError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
-            operation = operationForRequest vRequestError vc method (Wai.rawPathInfo req)
+            method = either (\err -> vRequestError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
+            path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
+                fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
+            pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
+                getPathItem (configuredApiDefinition vc) path
+            legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
+            operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $
+                operationForMethod method pathItem
             contentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
             specReqBody = deref openApi OA.requestBodies $
                 fromMaybe (vRequestError $ "no request body for that method") $
@@ -295,7 +294,12 @@ validatorMiddleware vc app req sendResponse = do
                 then validateJsonDocument vResponseError openApi schema respBody
                 else ()
             in
-                validateReqSchema `also` validateQueryParams `also` validateRespSchema
+                foldr seq ()
+                    [ pathItem `orElse` assertP CombinedError "path not found but there was no 404 response" (status == 404)
+                    , operation `orElse` assertP CombinedError "method not found but there was no 405 response" (status == 405)
+                    , validateReqSchema `also` validateQueryParams `also` validateRespSchema
+                    ]
+
 
         sendResponse resp
 
