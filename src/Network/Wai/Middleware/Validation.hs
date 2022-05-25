@@ -226,6 +226,7 @@ orElseTraced a b = unsafeDupablePerformIO $ do
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
+{-# noinline lseq #-}
 lseq :: a -> b -> b
 lseq a b = unsafeDupablePerformIO $ do
     evaluate a
