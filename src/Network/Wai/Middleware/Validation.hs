@@ -42,7 +42,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.These
 import Data.Typeable
-import GHC.Conc
+import GHC.Conc(pseq)
 import Network.HTTP.Media
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
@@ -169,12 +169,16 @@ params f ty =
 -- application/json and application/json;charset=utf-8 are identical. we look things
 -- up in the spec by content type, so this normalization lets us avoid duplicating
 -- entries for the two MIME types.
-stripCharsetUtf8 :: MediaType -> MediaType
-stripCharsetUtf8 ty
-    | contentTypeIsJson ty = ty & params . at "charset" %~ \case
-        Just "utf-8" -> Nothing
-        v -> v
-    | otherwise = ty
+-- the `q` parameter for a content type is only used to indicate level of preference
+-- for that type in an Accept header, making it useless for us.
+normalizeContentType :: MediaType -> MediaType
+normalizeContentType ty =
+    ty
+        & params . at "charset" %~ stripCharsetUtf8
+        & params . at "q" .~ Nothing
+    where
+    stripCharsetUtf8 (Just "utf-8") | contentTypeIsJson ty = Nothing
+    stripCharsetUtf8 v = v
 
 deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
 deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
@@ -243,8 +247,8 @@ validatorMiddleware vc app req sendResponse = do
             legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
             operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $
                 operationForMethod method pathItem
-            reqContentType = stripCharsetUtf8 $ getContentType (Wai.requestHeaders req)
-            respContentType = stripCharsetUtf8 $ getContentType (Wai.responseHeaders resp)
+            reqContentType = normalizeContentType $ getContentType (Wai.requestHeaders req)
+            respContentType = normalizeContentType $ getContentType (Wai.responseHeaders resp)
             specReqBody = deref openApi OA.requestBodies $
                 fromMaybe (vRequestError $ "no request body for that method") $
                 operation ^. OA.requestBody
@@ -309,7 +313,7 @@ validatorMiddleware vc app req sendResponse = do
                 then validateJsonDocument (\e -> vResponseError ("error validating response body: " <> e)) openApi schema respBody
                 else ()
             maybeAcceptableMediaTypes =
-                fmap (stripCharsetUtf8 . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
+                fmap (normalizeContentType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
             validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
                 Nothing -> ()
                 Just acceptableMediaTypes ->
