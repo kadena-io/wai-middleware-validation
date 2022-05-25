@@ -22,7 +22,7 @@ module Network.Wai.Middleware.Validation
 import Control.Applicative
 import Control.Exception
 import qualified Control.Exception.Safe as Safe
-import Control.Lens hiding ((.=))
+import Control.Lens hiding ((.=), lazy)
 import qualified Control.Lens.Unsound as Unsound
 import Control.Monad
 import qualified Data.Aeson as Aeson
@@ -45,7 +45,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.These
 import Data.Typeable
-import GHC.Conc(pseq)
+import GHC.Exts
 import Network.HTTP.Media
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
@@ -226,6 +226,9 @@ orElseTraced a b = unsafeDupablePerformIO $ do
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
+lseq :: a -> b -> b
+lseq a b = lazy a `seq` lazy b
+
 assertP :: ErrorProvenance -> String -> Bool -> ()
 assertP _ _ True = ()
 assertP prov msg False = throw $ ValidationException [(prov, msg)]
@@ -329,7 +332,7 @@ validatorMiddleware vc app req sendResponse = do
                     then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406)
                     else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes)
             in
-                foldr pseq ()
+                foldr lseq ()
                     [ pathItem `orElseTraced`
                         assertP CombinedError "path not found but there was no 404 response" (status == 404)
                     , operation `orElseTraced`
