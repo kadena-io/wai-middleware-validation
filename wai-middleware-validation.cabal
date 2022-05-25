@@ -35,6 +35,7 @@ library
                      , these
                      , wai
   default-language:    Haskell2010
+  ghc-options: -fno-cse -fno-full-laziness
 
 test-suite wai-middleware-validation-test
   type:                exitcode-stdio-1.0
