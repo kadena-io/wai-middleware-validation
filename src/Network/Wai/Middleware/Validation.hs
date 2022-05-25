@@ -19,9 +19,12 @@ module Network.Wai.Middleware.Validation
     )
     where
 
+import Control.Applicative
 import Control.Exception
 import qualified Control.Exception.Safe as Safe
 import Control.Lens hiding ((.=))
+import qualified Control.Lens.Unsound as Unsound
+import Control.Monad
 import qualified Data.Aeson as Aeson
 import Data.Align
 import Data.ByteString(ByteString)
@@ -141,10 +144,6 @@ toApiDefinition openApi =
   where
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
--- TODO: allow HEAD on GET endpoints, with an empty request body schema
--- TODO: remove `q` parameter from content types for normalization,
---       because it's actually a preference indicator and not part of the media type
-
 -- | Make a middleware for Request/Response validation.
 mkValidator :: Log -> S8.ByteString -> OA.OpenApi -> Wai.Middleware
 mkValidator lg pathPrefix openApi =
@@ -165,11 +164,11 @@ params f ty =
     in f ps <&> \ps' ->
         M.foldlWithKey' (\ty' pk pv -> ty' /: (CI.original pk, CI.original pv)) (CI.original mt // CI.original st) ps'
 
--- the default charset for application/json is utf-8 per the spec, so the MIME types
--- application/json and application/json;charset=utf-8 are identical. we look things
--- up in the spec by content type, so this normalization lets us avoid duplicating
--- entries for the two MIME types.
--- the `q` parameter for a content type is only used to indicate level of preference
+-- the default charset for application/json is utf-8 per the spec, so the MIME
+-- types application/json and application/json;charset=utf-8 are identical. we
+-- look up request and response body schemas by content type, so this
+-- normalization lets us avoid duplicating entries for the two MIME types.  the
+-- `q` parameter for a content type is only used to indicate level of preference
 -- for that type in an Accept header, making it useless for us.
 normalizeContentType :: MediaType -> MediaType
 normalizeContentType ty =
@@ -245,8 +244,17 @@ validatorMiddleware vc app req sendResponse = do
             pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
                 getPathItem (configuredApiDefinition vc) path
             legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
-            operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $
-                operationForMethod method pathItem
+            -- it's always legal to HEAD an endpoint that supports GET, but
+            -- there is no response body expected.
+            fabricatedHeadOperation =
+                OA._pathItemGet pathItem &
+                    _Just . OA.responses . Unsound.adjoin (OA.responses . traversed) (OA.default_ . _Just) %~
+                        (\resp -> OA.Inline $ deref openApi OA.responses resp & OA.content . mapped . OA.schema .~ Nothing)
+
+            operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $ asum
+                [ operationForMethod method pathItem
+                , guard (method == HEAD) *> fabricatedHeadOperation
+                ]
             reqContentType = normalizeContentType $ getContentType (Wai.requestHeaders req)
             respContentType = normalizeContentType $ getContentType (Wai.responseHeaders resp)
             specReqBody = deref openApi OA.requestBodies $
