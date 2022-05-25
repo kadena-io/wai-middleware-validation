@@ -227,7 +227,9 @@ orElseTraced a b = unsafeDupablePerformIO $ do
     try' = try
 
 lseq :: a -> b -> b
-lseq a b = lazy a `seq` lazy b
+lseq a b = unsafeDupablePerformIO $ do
+    evaluate a
+    evaluate b
 
 assertP :: ErrorProvenance -> String -> Bool -> ()
 assertP _ _ True = ()
