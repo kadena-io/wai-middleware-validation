@@ -42,6 +42,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.These
 import Data.Typeable
+import GHC.Conc
 import Network.HTTP.Media
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
@@ -140,8 +141,9 @@ toApiDefinition openApi =
   where
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
--- TODO: allow invalid requests as long as the response is method not allowed, invalid request, or whichever is applicable
 -- TODO: allow HEAD on GET endpoints, with an empty request body schema
+-- TODO: remove `q` parameter from content types for normalization,
+--       because it's actually a preference indicator and not part of the media type
 
 -- | Make a middleware for Request/Response validation.
 mkValidator :: Log -> S8.ByteString -> OA.OpenApi -> Wai.Middleware
@@ -315,7 +317,7 @@ validatorMiddleware vc app req sendResponse = do
                     then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406)
                     else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes)
             in
-                foldr seq ()
+                foldr pseq ()
                     [ pathItem `orElseTraced`
                         assertP CombinedError "path not found but there was no 404 response" (status == 404)
                     , operation `orElseTraced`
@@ -324,7 +326,6 @@ validatorMiddleware vc app req sendResponse = do
                     , (validateReqSchema `also` validateQueryParams `also` validateRespSchema) `orElseTraced`
                         assertP CombinedError "invalid request body or query params but there was no 400 response" (status == 400)
                     ]
-
 
         sendResponse resp
 
