@@ -202,17 +202,17 @@ also a b = unsafeDupablePerformIO $ do
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
-orElse :: a -> b -> ()
+orElse :: a -> a -> a
 orElse a b = unsafeDupablePerformIO $ do
     a' <- try' (evaluate a)
     case a' of
-        Left _ -> evaluate b >> return ()
-        Right _ -> return ()
+        Left _ -> evaluate b
+        Right ar -> return ar
     where
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
 
-orElseTraced :: a -> b -> ()
+orElseTraced :: a -> b -> Bool
 orElseTraced a b = unsafeDupablePerformIO $ do
     a' <- try' (evaluate a)
     case a' of
@@ -220,17 +220,11 @@ orElseTraced a b = unsafeDupablePerformIO $ do
             b' <- try' (evaluate b)
             case b' of
                 Left be -> throwIO (ae <> be)
-                Right _ -> return ()
-        Right _ -> return ()
+                Right _ -> return True
+        Right _ -> return False
     where
     try' :: IO a -> IO (Either ValidationException a)
     try' = try
-
-{-# noinline lseq #-}
-lseq :: a -> b -> b
-lseq a b = unsafeDupablePerformIO $ do
-    evaluate a
-    evaluate b
 
 assertP :: ErrorProvenance -> String -> Bool -> ()
 assertP _ _ True = ()
@@ -329,13 +323,13 @@ validatorMiddleware vc app req sendResponse = do
             maybeAcceptableMediaTypes =
                 fmap (normalizeContentType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
             validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
-                Nothing -> ()
+                Nothing -> False
                 Just acceptableMediaTypes ->
                     if null (acceptableMediaTypes `union` legalContentTypes)
-                    then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406)
-                    else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes)
+                    then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406) `seq` True
+                    else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes) `seq` False
             in
-                foldr lseq ()
+                or
                     [ pathItem `orElseTraced`
                         assertP CombinedError "path not found but there was no 404 response" (status == 404)
                     , operation `orElseTraced`
@@ -343,7 +337,7 @@ validatorMiddleware vc app req sendResponse = do
                     , validateResponseContentTypeNegotiation
                     , (validateReqSchema `also` validateQueryParams `also` validateRespSchema) `orElseTraced`
                         assertP CombinedError "invalid request body or query params but there was no 400 response" (status == 400)
-                    ]
+                    ] `seq` ()
 
         sendResponse resp
 
