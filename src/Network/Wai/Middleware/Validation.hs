@@ -355,7 +355,9 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 logCoverage (configuredLog vc) =<<
                     addCoverage coverageRef p m status reqContentType respContentType
             evaluate $ or
-                [ pathItem `orElseTraced`
+                -- always allow OPTIONS requests with no validation, but if the method fails to parse, fall through
+                [ (method == OPTIONS) `orElse` False
+                , pathItem `orElseTraced`
                     assertP CombinedError "path not found but there was no 404 response" (status == 404)
                 , operation `orElseTraced`
                     assertP CombinedError "method not found but there was no 405 response" (status == 405)
