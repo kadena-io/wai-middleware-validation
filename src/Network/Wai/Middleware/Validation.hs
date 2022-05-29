@@ -259,7 +259,7 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 method = either (\err -> vRequestError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
                 path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
                     fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-                definedPath = lookupDefinedPath (S8.unpack $ Wai.rawPathInfo req) $ getPathMap (configuredApiDefinition vc)
+                definedPath = lookupDefinedPath path $ getPathMap (configuredApiDefinition vc)
                 pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
                     definedPath >>= \p ->
                         openApi ^? OA.paths . at p . _Just
