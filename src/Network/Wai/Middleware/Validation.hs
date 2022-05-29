@@ -176,8 +176,8 @@ params f ty =
 -- normalization lets us avoid duplicating entries for the two MIME types.  the
 -- `q` parameter for a content type is only used to indicate level of preference
 -- for that type in an Accept header, making it useless for us.
-normalizeContentType :: MediaType -> MediaType
-normalizeContentType ty =
+normalizeMediaType :: MediaType -> MediaType
+normalizeMediaType ty =
     ty
         & params . at "charset" %~ stripCharsetUtf8
         & params . at "q" .~ Nothing
@@ -266,8 +266,8 @@ validatorMiddleware vc = do
                         [ operationForMethod method pathItem
                         , guard (method == HEAD) *> fabricatedHeadOperation
                         ]
-                    reqContentType = normalizeContentType $ getContentType (Wai.requestHeaders req)
-                    respContentType = normalizeContentType $ getContentType (Wai.responseHeaders resp)
+                    reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
+                    respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
                     specReqBody = deref openApi OA.requestBodies $
                         fromMaybe (vRequestError $ "no request body for that method") $
                         operation ^. OA.requestBody
@@ -332,7 +332,7 @@ validatorMiddleware vc = do
                         then validateJsonDocument (\e -> vResponseError ("error validating response body: " <> e)) openApi schema respBody
                         else ()
                     maybeAcceptableMediaTypes =
-                        fmap (normalizeContentType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
+                        fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
                     validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
                         Nothing -> False
                         Just acceptableMediaTypes ->
@@ -361,14 +361,14 @@ initialCoverageMap openApi = M.fromList
         [ (meth,
             ( M.fromList
                 [ (status, M.fromList
-                    [ (normalizeContentType mediaType, 0)
+                    [ (normalizeMediaType mediaType, 0)
                     | (mediaType, _) <- content
                     ])
                 | (status, resp) <- maybeToList ((Nothing,) <$> OA._responsesDefault resps) ++ over (mapped._1) Just (InsOrdHashMap.toList (OA._responsesResponses resps))
                 , let content = InsOrdHashMap.toList $ deref openApi OA.responses resp ^. OA.content
                 ]
             , M.fromList
-                [ (normalizeContentType mediaType, 0)
+                [ (normalizeMediaType mediaType, 0)
                 | Just req <- [op ^. OA.requestBody]
                 , (mediaType, _) <- InsOrdHashMap.toList $ deref openApi OA.requestBodies req ^. OA.content
                 ]
