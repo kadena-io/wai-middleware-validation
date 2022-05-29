@@ -16,6 +16,7 @@ module Network.Wai.Middleware.Validation
     , Log(..)
     , ValidationException(..)
     , toApiDefinition
+    , initialCoverageMap
     )
     where
 
@@ -151,9 +152,9 @@ toApiDefinition openApi =
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
 -- | Make a middleware for Request/Response validation.
-mkValidator :: Log -> S8.ByteString -> OA.OpenApi -> IO Wai.Middleware
-mkValidator lg pathPrefix openApi =
-    validatorMiddleware mValidatorConfig
+mkValidator :: IORef CoverageMap -> Log -> S8.ByteString -> OA.OpenApi -> IO Wai.Middleware
+mkValidator coverageRef lg pathPrefix openApi =
+    validatorMiddleware coverageRef mValidatorConfig
   where
     mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi) lg
 
@@ -236,10 +237,9 @@ assertP :: ErrorProvenance -> String -> Bool -> ()
 assertP _ _ True = ()
 assertP prov msg False = throw $ ValidationException [(prov, msg)]
 
-validatorMiddleware :: ValidatorConfiguration -> IO Wai.Middleware
-validatorMiddleware vc = do
+validatorMiddleware :: IORef CoverageMap -> ValidatorConfiguration -> IO Wai.Middleware
+validatorMiddleware coverageRef vc = do
     let openApi = getOpenApi $ configuredApiDefinition vc
-    coverageTracker <- newIORef $ initialCoverageMap openApi
     return $ \app req sendResponse -> do
         (reqBody, newReq) <- getRequestBody req
         app newReq $ \resp -> do
@@ -342,7 +342,7 @@ validatorMiddleware vc = do
 
                 for_ ((,) <$> definedPath <*> (Just method `orElse` Nothing)) $ \(p, m) -> do
                     logCoverage (configuredLog vc) =<<
-                        addCoverage coverageTracker p m status reqContentType respContentType
+                        addCoverage coverageRef p m status reqContentType respContentType
                 evaluate $ or
                     [ pathItem `orElseTraced`
                         assertP CombinedError "path not found but there was no 404 response" (status == 404)
