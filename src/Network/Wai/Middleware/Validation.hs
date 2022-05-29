@@ -27,6 +27,7 @@ import Control.Lens hiding ((.=), lazy)
 import qualified Control.Lens.Unsound as Unsound
 import Control.Monad
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as Aeson
 import Data.Align
 import Data.ByteString(ByteString)
 import qualified Data.ByteString as BS
@@ -81,7 +82,18 @@ instance Show ValidationException where
 
 instance Exception ValidationException
 
-type CoverageMap = M.Map FilePath (M.Map StdMethod (M.Map (Maybe Int) (M.Map MediaType Int), M.Map MediaType Int))
+data MaybeStatus = StatusDefault | StatusInt !Int
+    deriving (Eq, Ord)
+
+maybeStatusToText StatusDefault = "default"
+maybeStatusToText (StatusInt n) = T.pack (show n)
+
+instance Aeson.ToJSON MaybeStatus where
+    toJSON = Aeson.toJSON . maybeStatusToText
+instance Aeson.ToJSONKey MaybeStatus where
+    toJSONKey = Aeson.toJSONKeyText maybeStatusToText
+
+type CoverageMap = M.Map FilePath (M.Map T.Text (M.Map MediaType Int, M.Map MaybeStatus (M.Map MediaType Int)))
 
 data Log = Log
     { logViolation :: (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> ValidationException -> IO ()
@@ -358,19 +370,19 @@ validatorMiddleware coverageRef vc = do
 initialCoverageMap :: OA.OpenApi -> CoverageMap
 initialCoverageMap openApi = M.fromList
     (InsOrdHashMap.toList $ openApi ^. OA.paths) <&> \pi -> M.fromList
-        [ (meth,
+        [ (T.decodeUtf8 $ renderStdMethod meth,
             ( M.fromList
+                [ (normalizeMediaType mediaType, 0)
+                | Just req <- [op ^. OA.requestBody]
+                , (mediaType, _) <- InsOrdHashMap.toList $ deref openApi OA.requestBodies req ^. OA.content
+                ]
+            , M.fromList
                 [ (status, M.fromList
                     [ (normalizeMediaType mediaType, 0)
                     | (mediaType, _) <- content
                     ])
-                | (status, resp) <- maybeToList ((Nothing,) <$> OA._responsesDefault resps) ++ over (mapped._1) Just (InsOrdHashMap.toList (OA._responsesResponses resps))
+                | (status, resp) <- maybeToList ((StatusDefault,) <$> OA._responsesDefault resps) ++ over (mapped._1) StatusInt (InsOrdHashMap.toList (OA._responsesResponses resps))
                 , let content = InsOrdHashMap.toList $ deref openApi OA.responses resp ^. OA.content
-                ]
-            , M.fromList
-                [ (normalizeMediaType mediaType, 0)
-                | Just req <- [op ^. OA.requestBody]
-                , (mediaType, _) <- InsOrdHashMap.toList $ deref openApi OA.requestBodies req ^. OA.content
                 ]
             ))
         | meth <- [DELETE, GET, PATCH, POST, PUT]
@@ -382,14 +394,14 @@ initialCoverageMap openApi = M.fromList
 addCoverage :: IORef CoverageMap -> FilePath -> StdMethod -> Int -> MediaType -> MediaType -> IO CoverageMap
 addCoverage coverageTracker path method status reqContentType respContentType =
     atomicModifyIORef' coverageTracker $ \m ->
-        join (,) $ m & at path . _Just . at method . _Just %~
-            (_1 %~ incResp) .
-            (_2 . at reqContentType . _Just +~ 1)
+        join (,) $ m & at path . _Just . at (T.decodeUtf8 $ renderStdMethod method) . _Just %~
+            (_1 . at reqContentType . _Just +~ 1) .
+            (_2 %~ incResp)
     where
     orDefault m =
-        case M.lookup (Just status) m of
-            Nothing -> at Nothing
-            Just _ -> at (Just status)
+        case M.lookup (StatusInt status) m of
+            Nothing -> at StatusDefault
+            Just _ -> at (StatusInt status)
     incResp m =
         m & orDefault m . _Just . at respContentType . _Just +~ 1
 
