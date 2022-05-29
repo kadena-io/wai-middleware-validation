@@ -345,6 +345,7 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                     fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
                 validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
                     Nothing -> False
+                    Just [] -> False
                     Just acceptableMediaTypes ->
                         if null (acceptableMediaTypes `union` legalContentTypes)
                         then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406) `seq` True
@@ -359,7 +360,7 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 , operation `orElseTraced`
                     assertP CombinedError "method not found but there was no 405 response" (status == 405)
                 , validateResponseContentTypeNegotiation
-                , (validateReqSchema `also` validateQueryParams `also` validateRespSchema) `orElseTraced`
+                , also validateRespSchema $ (validateReqSchema `also` validateQueryParams) `orElseTraced`
                     assertP CombinedError "invalid request body or query params but there was no 400 response" (status == 400)
                 ] `seq` ()
 
