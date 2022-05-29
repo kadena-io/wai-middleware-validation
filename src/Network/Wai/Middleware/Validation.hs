@@ -80,7 +80,12 @@ instance Show ValidationException where
 
 instance Exception ValidationException
 
-newtype Log = Log { runLog :: (Maybe L.ByteString, Wai.Request) -> Maybe (L.ByteString, Wai.Response) -> ValidationException -> IO () }
+type CoverageMap = M.Map FilePath (M.Map StdMethod (M.Map (Maybe Int) (M.Map MediaType Int), M.Map MediaType Int))
+
+data Log = Log
+    { logViolation :: (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> ValidationException -> IO ()
+    , logCoverage :: CoverageMap -> IO ()
+    }
 
 vRequestError :: String -> a
 vRequestError e = throw $ ValidationException [(RequestError, e)]
@@ -183,11 +188,11 @@ normalizeContentType ty =
 deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
 deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
 
-catchErrors :: ValidatorConfiguration -> (Maybe L.ByteString, Wai.Request) -> Maybe (L.ByteString, Wai.Response) -> IO () -> IO ()
+catchErrors :: ValidatorConfiguration -> (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> IO () -> IO ()
 catchErrors vc req res act =
     act `Safe.catches`
-        [ Safe.Handler $ runLog (configuredLog vc) req res
-        , Safe.Handler $ \(ex :: SomeException) -> runLog (configuredLog vc) req res $ ValidationException [(ResponseError, "unexpected error: " <> show ex)]
+        [ Safe.Handler $ logViolation (configuredLog vc) req res
+        , Safe.Handler $ \(ex :: SomeException) -> logViolation (configuredLog vc) req res $ ValidationException [(ResponseError, "unexpected error: " <> show ex)]
         ]
 
 also :: a -> b -> b
@@ -239,7 +244,7 @@ validatorMiddleware vc = do
         (reqBody, newReq) <- getRequestBody req
         app newReq $ \resp -> do
             respBody <- getResponseBody resp
-            catchErrors vc (Just reqBody, req) (Just (respBody, resp)) $ do
+            catchErrors vc (reqBody, req) (respBody, resp) $ do
                 let
                     method = either (\err -> vRequestError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
                     path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
@@ -335,8 +340,9 @@ validatorMiddleware vc = do
                             then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406) `seq` True
                             else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes) `seq` False
 
-                for_ ((,) <$> definedPath <*> (Just method `orElse` Nothing)) $
-                    \(p, m) -> addCoverage coverageTracker p m status reqContentType respContentType
+                for_ ((,) <$> definedPath <*> (Just method `orElse` Nothing)) $ \(p, m) -> do
+                    logCoverage (configuredLog vc) =<<
+                        addCoverage coverageTracker p m status reqContentType respContentType
                 evaluate $ or
                     [ pathItem `orElseTraced`
                         assertP CombinedError "path not found but there was no 404 response" (status == 404)
@@ -373,13 +379,12 @@ initialCoverageMap openApi = M.fromList
             resps = op ^. OA.responses
         ]
 
-addCoverage :: IORef CoverageMap -> FilePath -> StdMethod -> Int -> MediaType -> MediaType -> IO ()
+addCoverage :: IORef CoverageMap -> FilePath -> StdMethod -> Int -> MediaType -> MediaType -> IO CoverageMap
 addCoverage coverageTracker path method status reqContentType respContentType =
     atomicModifyIORef' coverageTracker $ \m ->
-        (m & at path . _Just . at method . _Just %~
+        join (,) $ m & at path . _Just . at method . _Just %~
             (_1 %~ incResp) .
             (_2 . at reqContentType . _Just +~ 1)
-        , ())
     where
     orDefault m =
         case M.lookup (Just status) m of
@@ -387,8 +392,6 @@ addCoverage coverageTracker path method status reqContentType respContentType =
             Just _ -> at (Just status)
     incResp m =
         m & orDefault m . _Just . at respContentType . _Just +~ 1
-
-type CoverageMap = M.Map FilePath (M.Map StdMethod (M.Map (Maybe Int) (M.Map MediaType Int), M.Map MediaType Int))
 
 getRequestBody :: Wai.Request -> IO (L.ByteString, Wai.Request)
 getRequestBody req = do
