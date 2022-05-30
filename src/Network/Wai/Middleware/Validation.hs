@@ -351,7 +351,7 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                         then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406) `seq` True
                         else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes) `seq` False
 
-            for_ ((,) <$> (definedPath `orElse` Nothing) <*> (Just method `orElse` Nothing)) $ \(p, m) -> do
+            for_ ((,) <$> (definedPath `orElse` Nothing) <*> ((Just $! method) `orElse` Nothing)) $ \(p, m) -> do
                 logCoverage (configuredLog vc) =<<
                     addCoverage coverageRef p m status reqContentType respContentType
             evaluate $ or
