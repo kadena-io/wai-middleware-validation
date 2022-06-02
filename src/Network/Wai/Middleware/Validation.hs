@@ -77,7 +77,7 @@ instance Show TopLevelError where
         where
         showErrs _ Nothing = []
         showErrs m (Just (errs, _)) =
-            [show m <> ":"] ++
+            [m <> ":"] ++
             (errs & (mapped . lined) %~ ("  " <>))
 
 data MaybeStatus = StatusDefault | StatusInt !Int
@@ -233,6 +233,7 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 [ operationForMethod method pathItem
                 , guard (method == HEAD) *> fabricatedHeadOperation
                 ]
+            liftIO $ print operation
             let
                 reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
                 respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
