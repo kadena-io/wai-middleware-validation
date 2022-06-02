@@ -27,15 +27,17 @@ library
                      , http-types
                      , insert-ordered-containers
                      , lens
+                     , mtl
                      , openapi3
                      , parallel
                      , safe-exceptions
                      , semialign
                      , text
                      , these
+                     , validation
                      , wai
   default-language:    Haskell2010
-  ghc-options: -fno-cse -fno-full-laziness 
+  ghc-options: -fno-cse -fno-full-laziness
 
 test-suite wai-middleware-validation-test
   type:                exitcode-stdio-1.0

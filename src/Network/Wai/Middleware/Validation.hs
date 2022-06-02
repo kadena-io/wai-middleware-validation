@@ -14,7 +14,7 @@ module Network.Wai.Middleware.Validation
     ( mkValidator
     , validatorMiddleware
     , Log(..)
-    , ValidationException(..)
+    , TopLevelError(..)
     , toApiDefinition
     , initialCoverageMap
     )
@@ -26,6 +26,7 @@ import qualified Control.Exception.Safe as Safe
 import Control.Lens hiding ((.=), lazy)
 import qualified Control.Lens.Unsound as Unsound
 import Control.Monad
+import Control.Monad.Except
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import Data.Align
@@ -36,6 +37,7 @@ import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.CaseInsensitive(CI)
 import qualified Data.CaseInsensitive as CI
+import Data.Either
 import Data.Foldable
 import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
 import qualified Data.HashMap.Strict.InsOrd as InsOrdHashMap
@@ -48,39 +50,35 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.These
 import Data.Typeable
+import Data.Validation
 import GHC.Exts
 import Network.HTTP.Media
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
 import System.FilePath (splitDirectories)
-import System.IO.Unsafe (unsafeDupablePerformIO)
-import Debug.Trace
+import System.IO.Unsafe (unsafeInterleaveIO)
 
 import qualified Data.OpenApi as OA
 
 import qualified Data.OpenApi.Schema.Generator as OA
 
-data ErrorProvenance
-    = RequestError
-    | ResponseError
-    | CombinedError
-    deriving Show
+data TopLevelError
+    = TopLevelError
+    { requestError :: !(Maybe ([String], Maybe Status))
+    , responseError :: !(Maybe ([String], Maybe Status))
+    }
 
-data ValidationException
-    = ValidationException [(ErrorProvenance, String)]
-    deriving (Typeable)
-
-instance Semigroup ValidationException where
-    ValidationException errs <> ValidationException errs' =
-        ValidationException (errs <> errs')
-
-instance Show ValidationException where
-    show (ValidationException errs) = unlines $
-        [ show p <> ": " <> err
-        | (p, err) <- errs
+instance Show TopLevelError where
+    show e = unlines $ concat
+        [ ["compliance error:"]
+        , showErrs "Request errors" (requestError e)
+        , showErrs "Response errors" (responseError e)
         ]
-
-instance Exception ValidationException
+        where
+        showErrs _ Nothing = []
+        showErrs m (Just (errs, _)) =
+            [show m <> ":"] ++
+            (errs & (mapped . lined) %~ ("  " <>))
 
 data MaybeStatus = StatusDefault | StatusInt !Int
     deriving (Eq, Ord)
@@ -96,15 +94,9 @@ instance Aeson.ToJSONKey MaybeStatus where
 type CoverageMap = M.Map FilePath (M.Map T.Text (M.Map MediaType Int, M.Map MaybeStatus (M.Map MediaType Int)))
 
 data Log = Log
-    { logViolation :: (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> ValidationException -> IO ()
+    { logViolation :: (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> TopLevelError -> IO ()
     , logCoverage :: CoverageMap -> IO ()
     }
-
-vRequestError :: String -> a
-vRequestError e = throw $ ValidationException [(RequestError, e)]
-
-vResponseError :: String -> a
-vResponseError e = throw $ ValidationException [(ResponseError, e)]
 
 data ValidatorConfiguration = ValidatorConfiguration
     { configuredPathPrefix :: !BS.ByteString
@@ -201,69 +193,34 @@ normalizeMediaType ty =
 deref :: OA.OpenApi -> Lens' OA.Components (OA.Definitions c) -> OA.Referenced c -> c
 deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
 
-catchErrors :: ValidatorConfiguration -> (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> IO () -> IO ()
-catchErrors vc req res act =
-    act `Safe.catches`
-        [ Safe.Handler $ logViolation (configuredLog vc) req res
-        , Safe.Handler $ \(ex :: SomeException) -> logViolation (configuredLog vc) req res $ ValidationException [(ResponseError, "unexpected error: " <> show ex)]
-        ]
+catchErrors :: ValidatorConfiguration -> (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> ExceptT TopLevelError IO () -> IO ()
+catchErrors vc req res act = do
+    err <- either id (\() -> TopLevelError Nothing Nothing) <$> (runExceptT act) `Safe.catch`
+        \(ex :: SomeException) -> return $ Left $ mkRequestError ("unexpected error: " <> show ex) Nothing
+    when (isJust (requestError err) || isJust (responseError err)) $
+        logViolation (configuredLog vc) req res err
 
-also :: a -> b -> b
-also a b = unsafeDupablePerformIO $ do
-    a' <- try' (evaluate a)
-    b' <- try' (evaluate b)
-    case (a', b') of
-        (Left ae, Left be) -> throwIO (ae <> be)
-        (Left ae, _) -> throwIO ae
-        (_, Left be) -> throwIO be
-        (Right _, Right br) -> return br
-    where
-    try' :: IO a -> IO (Either ValidationException a)
-    try' = try
-
-orElse :: a -> a -> a
-orElse a b = unsafeDupablePerformIO $ do
-    a' <- try' (evaluate a)
-    case a' of
-        Left _ -> evaluate b
-        Right ar -> return ar
-    where
-    try' :: IO a -> IO (Either ValidationException a)
-    try' = try
-
-orElseTraced :: a -> b -> Bool
-orElseTraced a b = unsafeDupablePerformIO $ do
-    a' <- try' (evaluate a)
-    case a' of
-        Left ae -> do
-            b' <- try' (evaluate b)
-            case b' of
-                Left be -> throwIO (ae <> be)
-                Right _ -> return True
-        Right _ -> return False
-    where
-    try' :: IO a -> IO (Either ValidationException a)
-    try' = try
-
-assertP :: ErrorProvenance -> String -> Bool -> ()
-assertP _ _ True = ()
-assertP prov msg False = throw $ ValidationException [(prov, msg)]
+mkRequestError :: String -> Maybe Status -> TopLevelError
+mkRequestError msg st = TopLevelError
+    { requestError = Just ([msg], st)
+    , responseError = Nothing
+    }
 
 validatorMiddleware :: IORef CoverageMap -> ValidatorConfiguration -> Wai.Middleware
 validatorMiddleware coverageRef vc app req sendResponse = do
     (reqBody, newReq) <- getRequestBody req
     app newReq $ \resp -> do
-        respBody <- getResponseBody resp
+        respBody <- unsafeInterleaveIO $ getResponseBody resp
         catchErrors vc (reqBody, req) (respBody, resp) $ do
+            method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (Just methodNotAllowed405)) pure $
+                parseMethod $ Wai.requestMethod req
+            path <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (Just notFound404)) pure $
+                fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
+            definedPath <- maybe (throwError $ mkRequestError ("no such path: " <> path) (Just notFound404)) pure $
+                lookupDefinedPath path $ getPathMap (configuredApiDefinition vc)
+            pathItem <- maybe (throwError $ mkRequestError "pathItem: PathMap inaccurate, report this as a bug" Nothing) pure $
+                openApi ^? OA.paths . at definedPath . _Just
             let
-                method = either (\err -> vRequestError $ "non-standard HTTP method: " <> show err) id $ parseMethod $ Wai.requestMethod req
-                path = fromMaybe (vRequestError $ "path prefix not in path: " <> show (Wai.rawPathInfo req)) $
-                    fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
-                definedPath = lookupDefinedPath path $ getPathMap (configuredApiDefinition vc)
-                pathItem = fromMaybe (vRequestError $ "no such path: " <> path) $
-                    definedPath >>= \p ->
-                        openApi ^? OA.paths . at p . _Just
-
                 legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
                 -- it's always legal to HEAD an endpoint that supports GET, but
                 -- there is no response body expected.
@@ -272,99 +229,110 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                         _Just . OA.responses . Unsound.adjoin (OA.responses . traversed) (OA.default_ . _Just) %~
                             (\resp -> OA.Inline $ deref openApi OA.responses resp & OA.content . mapped . OA.schema .~ Nothing)
 
-                operation = fromMaybe (vRequestError $ "no such method for that path; legal methods are " <> show legalMethods) $ asum
-                    [ operationForMethod method pathItem
-                    , guard (method == HEAD) *> fabricatedHeadOperation
-                    ]
+            operation <- maybe (throwError $ mkRequestError ("no such method for that path; legal methods are " <> show legalMethods) (Just methodNotAllowed405)) pure $ asum
+                [ operationForMethod method pathItem
+                , guard (method == HEAD) *> fabricatedHeadOperation
+                ]
+            let
                 reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
                 respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
-                specReqBody = deref openApi OA.requestBodies $
-                    fromMaybe (vRequestError $ "no request body for that method") $
-                    operation ^. OA.requestBody
-                reqSchema = fromMaybe (vRequestError $ "no schema for that request") $
-                    specReqBody ^? OA.content . at reqContentType . _Just . OA.schema . _Just
-                validateReqSchema =
-                    if elem method [POST, PUT] && contentTypeIsJson reqContentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
-                    then validateJsonDocument (\e -> vRequestError ("error validating request body: " <> e)) openApi reqSchema reqBody
-                    else ()
-                expectedQueryParams =
-                    [ (T.encodeUtf8 $ OA._paramName dp, dp)
-                    | p <- operation ^. OA.parameters
-                    , let dp = deref openApi OA.parameters p
-                    -- TODO: validate parameters not in the query
-                    , OA._paramIn dp == OA.ParamQuery
-                    ]
-                paramError k e =
-                    vRequestError $ unwords [ "error validating query parameter", S8.unpack k, ":", e ]
-                validateQueryParams = let
-                    checkQueryParam k v = case v of
-                        This _ -> paramError k "this parameter is not specified"
-                        That p ->
-                            -- per https://swagger.io/docs/specification/describing-parameters/ section "Required and Optional Parameters",
-                            -- parameters are not required by default
-                            if fromMaybe False (OA._paramRequired p)
-                            then paramError k "this parameter is required and not present"
-                            else ()
-                        These maybeValue param -> case maybeValue of
-                            Nothing ->
-                                if fromMaybe False $ OA._paramAllowEmptyValue param then ()
-                                else paramError k $ unwords ["an empty value for this query parameter is not allowed"]
-                            Just value -> let
-                                paramSchema = fromMaybe (paramError k "no schema specified for this parameter") $
-                                    OA._paramSchema param
-                                validateRaw =
-                                    validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict value)
-                                validateQuoted =
-                                    validateJsonDocument (paramError k) openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
-                                in
-                                    -- query parameters are usually not valid JSON
-                                    -- because they lack quotes, so we add them in if
-                                    -- necessary, though we strip them out again if both
-                                    -- fail for a better error message.
-                                    foldr orElse () [validateRaw, validateQuoted, validateRaw]
-                    in
-                        M.foldr also () $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
+                validateRequest = do
+                    (deref openApi OA.requestBodies -> specReqBody) <-
+                        maybe (Left $ (["no specified request body for that method"], Nothing)) Right $
+                            operation ^. OA.requestBody
+                    let
+                        validateReqSchema = fromEither $ do
+                            if elem method [POST, PUT] && contentTypeIsJson reqContentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
+                            then do
+                                reqSchema <- maybe (Left ["no schema for that request"]) Right $
+                                    specReqBody ^? OA.content . at reqContentType . _Just . OA.schema . _Just
+                                over _Left (\e -> ["error validating request body: " <> e]) $ validateJsonDocument openApi reqSchema reqBody
+                            else Right ()
+                        expectedQueryParams =
+                            [ (T.encodeUtf8 $ OA._paramName dp, dp)
+                            | p <- operation ^. OA.parameters
+                            , let dp = deref openApi OA.parameters p
+                            -- TODO: validate parameters not in the query
+                            , OA._paramIn dp == OA.ParamQuery
+                            ]
+                        paramError k e =
+                            [ unwords [ "error validating query parameter", S8.unpack k, ":", e ] ]
+                        validateQueryParams = let
+                            checkQueryParam k v = case v of
+                                This _ -> Failure $ paramError k "this parameter is not specified"
+                                That p ->
+                                    -- per https://swagger.io/docs/specification/describing-parameters/ section "Required and Optional Parameters",
+                                    -- parameters are not required by default
+                                    if fromMaybe False (OA._paramRequired p)
+                                    then Failure $ paramError k "this parameter is required and not present"
+                                    else Success ()
+                                These maybeValue param -> case maybeValue of
+                                    Nothing ->
+                                        if fromMaybe False $ OA._paramAllowEmptyValue param
+                                        then Success ()
+                                        else Failure $ paramError k $ unwords ["an empty value for this query parameter is not allowed"]
+                                    Just value -> fromEither $ do
+                                        paramSchema <- maybe (Left $ paramError k "no schema specified for this parameter") Right $
+                                            OA._paramSchema param
+                                        let
+                                            validateRaw =
+                                                over _Left (paramError k) $ validateJsonDocument openApi paramSchema (L.fromStrict value)
+                                            validateQuoted =
+                                                over _Left (paramError k) $ validateJsonDocument openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
+                                        -- query parameters are usually not valid JSON
+                                        -- because they lack quotes, so we add them in if
+                                        -- necessary, though we strip them out again if both
+                                        -- fail for a better error message.
+                                        case validateRaw of
+                                            Left x -> case validateQuoted of
+                                                Left _ -> Left x
+                                                r -> r
+                                            r -> r
+                            in
+                                traverse_ snd $ M.toList $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
+                    validation (\e -> Left (e, Just badRequest400)) (\() -> Right ()) (validateReqSchema *> validateQueryParams)
                 status = statusCode $ Wai.responseStatus resp
                 legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
-                specResp = deref openApi OA.responses $
-                    fromMaybe (vResponseError $ "no response for that status code; legal status codes are " <> show legalStatusCodes) $ asum
-                        [ operation ^. OA.responses . at status
-                        , operation ^. OA.responses . OA.default_
-                        ]
-                legalContentTypes = specResp ^. OA.content . to keys
+                validateResponse = do
+                    (deref openApi OA.responses -> specResp) <-
+                        maybe (Left ("no response for that status code; legal status codes are " <> show legalStatusCodes, Nothing)) Right $ asum
+                            [ operation ^. OA.responses . at status
+                            , operation ^. OA.responses . OA.default_
+                            ]
+                    let
+                        legalContentTypes = specResp ^. OA.content . to keys
+                        validateRespSchema =
+                            if contentTypeIsJson respContentType && (null (specResp ^? OA.content) || not (L.null respBody))
+                            then do
+                                content <- maybe (Left ("no content type for that response; legal content types are " <> show legalContentTypes, Nothing)) Right $
+                                    specResp ^? OA.content . at respContentType . _Just
+                                schema <- maybe (Left ("no schema for that content", Nothing)) Right $
+                                    content ^? OA.schema . _Just
+                                over _Left (\e -> ("error validating response body: " <> e, Nothing)) $ validateJsonDocument openApi schema respBody
+                            else Right ()
+                        maybeAcceptableMediaTypes =
+                            fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
+                        validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
+                            Nothing -> Right ()
+                            Just [] -> Right ()
+                            Just acceptableMediaTypes ->
+                                if null (acceptableMediaTypes `union` legalContentTypes)
+                                then Left ("server has no acceptable content types to return but there was no 406 response", Just notAcceptable406)
+                                else if any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes
+                                then Right ()
+                                else Left ("server responded with an unacceptable content type", Nothing)
+                    validateResponseContentTypeNegotiation >> validateRespSchema
 
-                content = fromMaybe (vResponseError $ "no content type for that response; legal content types are " <> show legalContentTypes) $
-                    specResp ^? OA.content . at respContentType . _Just
-                schema = fromMaybe (vResponseError "no schema for that content") $
-                    content ^? OA.schema . _Just
-                validateRespSchema =
-                    if contentTypeIsJson respContentType && (null (specResp ^? OA.content) || not (L.null respBody))
-                    then validateJsonDocument (\e -> vResponseError ("error validating response body: " <> e)) openApi schema respBody
-                    else ()
-                maybeAcceptableMediaTypes =
-                    fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
-                validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
-                    Nothing -> False
-                    Just [] -> False
-                    Just acceptableMediaTypes ->
-                        if null (acceptableMediaTypes `union` legalContentTypes)
-                        then assertP CombinedError "server has no acceptable content types to return but there was no 406 response" (status == 406) `seq` True
-                        else assertP CombinedError "server responded with an unacceptable content type" (any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes) `seq` False
-
-            for_ ((,) <$> (definedPath `orElse` Nothing) <*> ((Just $! method) `orElse` Nothing)) $ \(p, m) -> do
-                logCoverage (configuredLog vc) =<<
-                    addCoverage coverageRef p m status reqContentType respContentType
-            evaluate $ or
-                -- always allow OPTIONS requests with no validation, but if the method fails to parse, fall through
-                [ (method == OPTIONS) `orElse` False
-                , pathItem `orElseTraced`
-                    assertP CombinedError "path not found but there was no 404 response" (status == 404)
-                , operation `orElseTraced`
-                    assertP CombinedError "method not found but there was no 405 response" (status == 405)
-                , validateResponseContentTypeNegotiation
-                , also validateRespSchema $ (validateReqSchema `also` validateQueryParams) `orElseTraced`
-                    assertP CombinedError "invalid request body or query params but there was no 400 response" (status == 400)
-                ] `seq` ()
+            liftIO $ logCoverage (configuredLog vc) =<<
+                addCoverage coverageRef definedPath method status reqContentType respContentType
+            -- for OPTIONS anything goes really... TODO, fix that?
+            if method == OPTIONS then
+                pure ()
+            else
+                throwError $ TopLevelError
+                    { requestError = either Just (\() -> Nothing) validateRequest
+                    , responseError = either (Just . over _1 (:[])) (\() -> Nothing) validateResponse
+                    }
 
         sendResponse resp
     where
@@ -442,16 +410,16 @@ getContentType headers =
     fromMaybe "application/json" $
         fromString . S8.unpack <$> lookup hContentType headers
 
-validateJsonDocument :: (forall a. String -> a) -> OA.OpenApi -> OA.Referenced OA.Schema -> L.ByteString -> ()
-validateJsonDocument err openApi bodySchema dataJson =
-  case errors of
-    [] -> ()
-    _ -> err $ unlines errors
+validateJsonDocument :: OA.OpenApi -> OA.Referenced OA.Schema -> L.ByteString -> Either String ()
+validateJsonDocument openApi bodySchema dataJson = do
+    decoded <- maybe (Left "The document is not valid JSON") Right $ Aeson.decode dataJson
+    let errors = map fixValidationError $ OA.validateJSON allSchemas dereferencedSchema decoded
+    case errors of
+        [] -> Right ()
+        _ -> Left $ unlines errors
   where
-    decoded = fromMaybe (err "The document is not valid JSON") $ Aeson.decode dataJson
     allSchemas = openApi ^. OA.components . OA.schemas
     dereferencedSchema = OA.dereference allSchemas bodySchema
-    errors = map fixValidationError $ OA.validateJSON allSchemas dereferencedSchema decoded
 
 fixValidationError :: String -> String
 fixValidationError msg = T.unpack $ foldr (uncurry T.replace) (T.pack msg) replacements
