@@ -233,7 +233,6 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 [ operationForMethod method pathItem
                 , guard (method == HEAD) *> fabricatedHeadOperation
                 ]
-            liftIO $ print operation
             let
                 reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
                 respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
