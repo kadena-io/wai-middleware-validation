@@ -238,16 +238,16 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
                 respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
                 validateRequest = do
-                    (deref openApi OA.requestBodies -> specReqBody) <-
-                        maybe (Left $ (["no specified request body for that method"], Nothing)) Right $
-                            operation ^. OA.requestBody
                     let
                         validateReqSchema = fromEither $ do
                             if elem method [POST, PUT] && contentTypeIsJson reqContentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
                             then do
-                                reqSchema <- maybe (Left ["no schema for that request"]) Right $
+                                specReqBody <- fmap (deref openApi OA.requestBodies) $
+                                    maybe (Left (["no specified request body for that method"], False)) Right $
+                                        operation ^. OA.requestBody
+                                reqSchema <- maybe (Left (["no schema for that request"], False)) Right $
                                     specReqBody ^? OA.content . at reqContentType . _Just . OA.schema . _Just
-                                over _Left (\e -> ["error validating request body: " <> e]) $ validateJsonDocument openApi reqSchema reqBody
+                                over _Left (\e -> (["error validating request body: " <> e], True)) $ validateJsonDocument openApi reqSchema reqBody
                             else Right ()
                         expectedQueryParams =
                             [ (T.encodeUtf8 $ OA._paramName dp, dp)
@@ -291,7 +291,12 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                                             r -> r
                             in
                                 traverse_ snd $ M.toList $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
-                    validation (\e -> Left (e, Just badRequest400)) (\() -> Right ()) (validateReqSchema *> validateQueryParams)
+                    case (validateReqSchema, validateQueryParams) of
+                        -- fatal error, unrecoverable by a 400 status
+                        (Failure (bodyErrs, False), Failure _) -> Left (bodyErrs, Nothing)
+                        (Failure (bodyErrs, True), paramErrs) ->
+                            Left (bodyErrs <> validation id (const []) paramErrs, Just badRequest400)
+                        (Success (), paramErrs) -> toEither $ over _Failure (,Just badRequest400) paramErrs
                 status = statusCode $ Wai.responseStatus resp
                 legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
                 validateResponse = do
