@@ -197,8 +197,10 @@ catchErrors :: ValidatorConfiguration -> (L.ByteString, Wai.Request) -> (L.ByteS
 catchErrors vc req res act = do
     err <- either id (\() -> TopLevelError Nothing Nothing) <$> (runExceptT act) `Safe.catch`
         \(ex :: SomeException) -> return $ Left $ mkRequestError ("unexpected error: " <> show ex) Nothing
-    -- TODO: status code-based recovery
-    when (isJust (requestError err) || isJust (responseError err)) $
+    let
+        statusRecovered e = fmap statusCode (snd e) == Just (statusCode (Wai.responseStatus (snd res)))
+        fatalError e = isJust e && any statusRecovered e
+    when (fatalError (requestError err) || fatalError (responseError err)) $
         logViolation (configuredLog vc) req res err
 
 mkRequestError :: String -> Maybe Status -> TopLevelError
