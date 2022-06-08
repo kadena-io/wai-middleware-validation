@@ -30,6 +30,7 @@ library
                      , mtl
                      , openapi3
                      , parallel
+                     , regex-tdfa
                      , safe-exceptions
                      , semialign
                      , text

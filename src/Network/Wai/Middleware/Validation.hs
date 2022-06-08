@@ -57,6 +57,7 @@ import Network.HTTP.Types
 import qualified Network.Wai as Wai
 import System.FilePath (splitDirectories)
 import System.IO.Unsafe (unsafeInterleaveIO)
+import Text.Regex.TDFA
 
 import qualified Data.OpenApi as OA
 
@@ -421,7 +422,7 @@ getContentType headers =
 validateJsonDocument :: OA.OpenApi -> OA.Referenced OA.Schema -> L.ByteString -> Either String ()
 validateJsonDocument openApi bodySchema dataJson = do
     decoded <- maybe (Left "The document is not valid JSON") Right $ Aeson.decode dataJson
-    let errors = map fixValidationError $ OA.validateJSON allSchemas dereferencedSchema decoded
+    let errors = map fixValidationError $ OA.validateJSONWithPatternChecker (flip (=~)) allSchemas dereferencedSchema decoded
     case errors of
         [] -> Right ()
         _ -> Left $ unlines errors
