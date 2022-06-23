@@ -104,13 +104,13 @@ instance Aeson.ToJSONKey MaybeStatus where
 -- the shape of the CoverageMap must be populated by the initialCoverageMap,
 -- attempting to add keys during operation is treated as an error.
 newtype CoverageMap = CoverageMap (M.Map FilePath EndpointCoverage)
-    deriving (Eq, Show, Generic)
+    deriving (Eq, Show, Generic, Aeson.ToJSON)
 newtype EndpointCoverage = EndpointCoverage (M.Map T.Text (RequestCoverage, ResponseCoverage))
-    deriving (Eq, Show, Generic)
+    deriving (Eq, Show, Generic, Aeson.ToJSON)
 newtype RequestCoverage = RequestCoverage (M.Map MediaType Int)
-    deriving (Eq, Show, Generic)
+    deriving (Eq, Show, Generic, Aeson.ToJSON)
 newtype ResponseCoverage = ResponseCoverage (M.Map MaybeStatus (M.Map MediaType Int))
-    deriving (Eq, Show, Generic)
+    deriving (Eq, Show, Generic, Aeson.ToJSON)
 instance Wrapped CoverageMap
 type instance Index CoverageMap = FilePath
 type instance IxValue CoverageMap = EndpointCoverage
