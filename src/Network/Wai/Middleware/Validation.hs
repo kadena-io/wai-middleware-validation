@@ -9,6 +9,10 @@
 {-# LANGUAGE GADTs      #-}
 {-# LANGUAGE TemplateHaskell      #-}
 {-# LANGUAGE LambdaCase      #-}
+{-# LANGUAGE TypeFamilies      #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving      #-}
+{-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE DerivingStrategies      #-}
 
 module Network.Wai.Middleware.Validation
     ( mkValidator
@@ -17,6 +21,10 @@ module Network.Wai.Middleware.Validation
     , TopLevelError(..)
     , toApiDefinition
     , initialCoverageMap
+    , CoverageMap(..)
+    , EndpointCoverage(..)
+    , RequestCoverage(..)
+    , ResponseCoverage(..)
     )
     where
 
@@ -52,6 +60,7 @@ import Data.These
 import Data.Typeable
 import Data.Validation
 import GHC.Exts
+import GHC.Generics hiding (to)
 import Network.HTTP.Media
 import Network.HTTP.Types
 import qualified Network.Wai as Wai
@@ -82,7 +91,7 @@ instance Show TopLevelError where
             (errs & (mapped . lined) %~ ("  " <>))
 
 data MaybeStatus = StatusDefault | StatusInt !Int
-    deriving (Eq, Ord)
+    deriving (Eq, Ord, Show)
 
 maybeStatusToText StatusDefault = "default"
 maybeStatusToText (StatusInt n) = T.pack (show n)
@@ -92,7 +101,36 @@ instance Aeson.ToJSON MaybeStatus where
 instance Aeson.ToJSONKey MaybeStatus where
     toJSONKey = Aeson.toJSONKeyText maybeStatusToText
 
-type CoverageMap = M.Map FilePath (M.Map T.Text (M.Map MediaType Int, M.Map MaybeStatus (M.Map MediaType Int)))
+-- the shape of the CoverageMap must be populated by the initialCoverageMap,
+-- attempting to add keys during operation is treated as an error.
+newtype CoverageMap = CoverageMap (M.Map FilePath EndpointCoverage)
+    deriving (Eq, Show, Generic)
+newtype EndpointCoverage = EndpointCoverage (M.Map T.Text (RequestCoverage, ResponseCoverage))
+    deriving (Eq, Show, Generic)
+newtype RequestCoverage = RequestCoverage (M.Map MediaType Int)
+    deriving (Eq, Show, Generic)
+newtype ResponseCoverage = ResponseCoverage (M.Map MaybeStatus (M.Map MediaType Int))
+    deriving (Eq, Show, Generic)
+instance Wrapped CoverageMap
+type instance Index CoverageMap = FilePath
+type instance IxValue CoverageMap = EndpointCoverage
+instance Ixed CoverageMap where ix k = _Wrapped' . ix k
+instance At CoverageMap where at k = _Wrapped' . at k
+instance Wrapped EndpointCoverage
+type instance Index EndpointCoverage = T.Text
+type instance IxValue EndpointCoverage = (RequestCoverage, ResponseCoverage)
+instance Ixed EndpointCoverage where ix k = _Wrapped' . ix k
+instance At EndpointCoverage where at k = _Wrapped' . at k
+instance Wrapped RequestCoverage
+type instance Index RequestCoverage = MediaType
+type instance IxValue RequestCoverage = Int
+instance Ixed RequestCoverage where ix k = _Wrapped' . ix k
+instance At RequestCoverage where at k = _Wrapped' . at k
+instance Wrapped ResponseCoverage
+type instance Index ResponseCoverage = MaybeStatus
+type instance IxValue ResponseCoverage = M.Map MediaType Int
+instance Ixed ResponseCoverage where ix k = _Wrapped' . ix k
+instance At ResponseCoverage where at k = _Wrapped' . at k
 
 data Log = Log
     { logViolation :: (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> TopLevelError -> IO ()
@@ -100,8 +138,7 @@ data Log = Log
     }
 
 data ValidatorConfiguration = ValidatorConfiguration
-    { configuredPathPrefix :: !BS.ByteString
-    , configuredApiDefinition :: !ApiDefinition
+    { configuredPrefixSpecPairs :: ![(BS.ByteString, ApiDefinition)]
     , configuredLog :: !Log
     }
 
@@ -157,11 +194,11 @@ toApiDefinition openApi =
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
 -- | Make a middleware for Request/Response validation.
-mkValidator :: IORef CoverageMap -> Log -> S8.ByteString -> OA.OpenApi -> Wai.Middleware
-mkValidator coverageRef lg pathPrefix openApi =
+mkValidator :: IORef CoverageMap -> Log -> [(S8.ByteString, OA.OpenApi)] -> Wai.Middleware
+mkValidator coverageRef lg prefixSpecMap =
     validatorMiddleware coverageRef mValidatorConfig
   where
-    mValidatorConfig = ValidatorConfiguration pathPrefix (toApiDefinition openApi) lg
+    mValidatorConfig = ValidatorConfiguration [(prefix, toApiDefinition spec) | (prefix, spec) <- prefixSpecMap] lg
 
 contentTypeIsJson :: MediaType -> Bool
 contentTypeIsJson ty =
@@ -204,8 +241,15 @@ catchErrors vc req res act = do
         fatalError (Just (_, Nothing)) =
             True
         fatalError Nothing = False
-    when (fatalError (requestError err) || fatalError (responseError err)) $
-        logViolation (configuredLog vc) req res err
+    case (requestError err, responseError err) of
+        (Just (_, Just recoveryStatus), _) | statusCode (Wai.responseStatus (snd res)) == statusCode recoveryStatus ->
+            return ()
+        (Nothing, Just (respErr, Just recoveryStatus)) | statusCode (Wai.responseStatus (snd res)) == statusCode recoveryStatus ->
+            return ()
+        (Nothing, Nothing) ->
+            return ()
+        _ ->
+            logViolation (configuredLog vc) req res err
 
 mkRequestError :: String -> Maybe Status -> TopLevelError
 mkRequestError msg st = TopLevelError
@@ -221,10 +265,11 @@ validatorMiddleware coverageRef vc app req sendResponse = do
         catchErrors vc (reqBody, req) (respBody, resp) $ do
             method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (Just methodNotAllowed405)) pure $
                 parseMethod $ Wai.requestMethod req
-            path <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (Just notFound404)) pure $
-                fmap S8.unpack $ S8.stripPrefix (configuredPathPrefix vc) (Wai.rawPathInfo req)
+            (path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (Just notFound404)) pure $
+                listToMaybe $ mapMaybe (\(prefix,spec) -> (,spec) . S8.unpack <$> S8.stripPrefix prefix (Wai.rawPathInfo req)) (configuredPrefixSpecPairs vc)
+            let openApi = getOpenApi spec
             definedPath <- maybe (throwError $ mkRequestError ("no such path: " <> path) (Just notFound404)) pure $
-                lookupDefinedPath path $ getPathMap (configuredApiDefinition vc)
+                lookupDefinedPath path $ getPathMap spec
             pathItem <- maybe (throwError $ mkRequestError "pathItem: PathMap inaccurate, report this as a bug" Nothing) pure $
                 openApi ^? OA.paths . at definedPath . _Just
             let
@@ -347,19 +392,17 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                     }
 
         sendResponse resp
-    where
-    openApi = getOpenApi $ configuredApiDefinition vc
 
 initialCoverageMap :: OA.OpenApi -> CoverageMap
-initialCoverageMap openApi = M.fromList
-    (InsOrdHashMap.toList $ openApi ^. OA.paths) <&> \pi -> M.fromList
+initialCoverageMap openApi = CoverageMap $ M.fromList
+    (InsOrdHashMap.toList $ openApi ^. OA.paths) <&> \pi -> EndpointCoverage (M.fromList
         [ (T.decodeUtf8 $ renderStdMethod meth,
-            ( M.fromList
+            ( RequestCoverage $ M.fromList
                 [ (normalizeMediaType mediaType, 0)
                 | Just req <- [op ^. OA.requestBody]
                 , (mediaType, _) <- InsOrdHashMap.toList $ deref openApi OA.requestBodies req ^. OA.content
                 ]
-            , M.fromList
+            , ResponseCoverage $ M.fromList
                 [ (status, M.fromList
                     [ (normalizeMediaType mediaType, 0)
                     | (mediaType, _) <- content
@@ -372,7 +415,7 @@ initialCoverageMap openApi = M.fromList
         , Just op <- [operationForMethod meth pi]
         , let
             resps = op ^. OA.responses
-        ]
+        ])
 
 addCoverage :: IORef CoverageMap -> FilePath -> StdMethod -> Int -> MediaType -> MediaType -> IO CoverageMap
 addCoverage coverageTracker path method status reqContentType respContentType =
@@ -382,7 +425,7 @@ addCoverage coverageTracker path method status reqContentType respContentType =
             (_2 %~ incResp)
     where
     orDefault m =
-        case M.lookup (StatusInt status) m of
+        case m ^? at (StatusInt status) of
             Nothing -> at StatusDefault
             Just _ -> at (StatusInt status)
     incResp m =

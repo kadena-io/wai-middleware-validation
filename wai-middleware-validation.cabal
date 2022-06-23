@@ -50,24 +50,17 @@ test-suite wai-middleware-validation-test
   build-depends:       base >= 4.7 && < 5
                      , aeson
                      , bytestring
+                     , containers
                      , here
                      , hspec
                      , http-types
                      , openapi3
+                     , predicate-transformers
                      , wai
                      , wai-extra
                      , wai-middleware-validation
   default-language:    Haskell2010
 
-test-suite wai-middleware-validation-doctest
-  type:                exitcode-stdio-1.0
-  main-is:             doctest-driver.hs
-  hs-source-dirs:      test/doctest
-  ghc-options:         -Wall
-  build-depends:       base >= 4.7 && < 5
-                     , doctest
-  default-language:    Haskell2010
-
 source-repository head
   type:     git
-  location: https://github.com/iij-ii/wai-middleware-validation
+  location: https://github.com/kadena-io/wai-middleware-validation
