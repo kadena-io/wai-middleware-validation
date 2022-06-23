@@ -199,8 +199,11 @@ catchErrors vc req res act = do
     err <- either id (\() -> TopLevelError Nothing Nothing) <$> (runExceptT act) `Safe.catch`
         \(ex :: SomeException) -> return $ Left $ mkRequestError ("unexpected error: " <> show ex) Nothing
     let
-        statusRecovered e = fmap statusCode (snd e) == Just (statusCode (Wai.responseStatus (snd res)))
-        fatalError e = isJust e && any statusRecovered e
+        fatalError (Just (msgs, Just recoveryStatus)) =
+            statusCode (Wai.responseStatus (snd res)) /= statusCode recoveryStatus
+        fatalError (Just (_, Nothing)) =
+            True
+        fatalError Nothing = False
     when (fatalError (requestError err) || fatalError (responseError err)) $
         logViolation (configuredLog vc) req res err
 
