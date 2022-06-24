@@ -190,5 +190,8 @@ spec = do
             it "doesn't validate the request or response body unless it is json" $
                 succeeds (methodPost, "/articles", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")
 
-            it "always succeeds if the method is OPTIONS" $
-                succeeds (methodOptions, "/whatever", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")
+            it "do nothing if the method is OPTIONS and the path exists" $
+                succeeds (methodOptions, "/articles", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")
+
+            it "log if the method is OPTIONS and the path does not exist" $
+                fails (methodOptions, "/whatever", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")

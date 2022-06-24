@@ -265,9 +265,6 @@ validatorMiddleware coverageRef vc app req sendResponse = do
         catchErrors vc (reqBody, req) (respBody, resp) $ do
             method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (Just methodNotAllowed405)) pure $
                 parseMethod $ Wai.requestMethod req
-            -- for OPTIONS anything goes really... TODO, fix that?
-            when (method == OPTIONS) $
-                throwError $ TopLevelError Nothing Nothing
             (path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (Just notFound404)) pure $
                 listToMaybe $ mapMaybe (\(prefix,spec) -> (,spec) . S8.unpack <$> S8.stripPrefix prefix (Wai.rawPathInfo req)) (configuredPrefixSpecPairs vc)
             let openApi = getOpenApi spec
@@ -275,6 +272,9 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 lookupDefinedPath path $ getPathMap spec
             pathItem <- maybe (throwError $ mkRequestError "pathItem: PathMap inaccurate, report this as a bug" Nothing) pure $
                 openApi ^? OA.paths . at definedPath . _Just
+            -- for OPTIONS anything goes as long as the path exists. TODO: check the contents of the response.
+            when (method == OPTIONS) $
+                throwError $ TopLevelError Nothing Nothing
             let
                 legalMethods = [ m | m <- [minBound .. maxBound], isJust (operationForMethod m pathItem)]
                 -- it's always legal to HEAD an endpoint that supports GET, but
