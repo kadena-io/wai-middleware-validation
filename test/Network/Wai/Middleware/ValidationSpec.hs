@@ -132,12 +132,14 @@ validateSucceeds prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStat
     void $ runSession
       (srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody))
       (mkValidator r (Log (\_ _ err -> print err >> stop) (\_ -> continue)) prefixSpecMap $ \_ resp -> resp $ responseLBS respStatus respHeaders (L.fromStrict respBody))
+
 validateFails :: [(BS.ByteString, OpenApi)] -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateFails prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStatus, respHeaders, respBody) = do
     r <- newIORef $ CoverageMap Map.empty
     void $ runSession
       (srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody))
       (mkValidator r (Log (\_ _ _ -> stop) (\_ -> continue)) prefixSpecMap $ \_ resp -> resp $ responseLBS respStatus respHeaders (L.fromStrict respBody)) `shouldThrow` (\(_ :: PredicateFailed) -> True)
+
 validateCoverage :: [(BS.ByteString, OpenApi)] -> (CoverageMap -> IO ()) -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateCoverage prefixSpecMap coveragePred = undefined
 
@@ -148,7 +150,6 @@ spec = do
             mkApp response _ respond = respond response
             validResponseBody = [here| {"cint": 1, "ctxt": "RESPONSE"} |]
             invalidResponseBody = [here| {"cint": 1} |]
-            -- mkSession requestBody = srequest $ SRequest (setPath (defaultRequest {requestMethod = methodPost}) "/articles") requestBody
             validRequestBody = [here| {"cint": 1, "ctxt": "REQUEST"} |]
             invalidRequestBody = [here| {"cint": 1, "ctxt": 0} |]
             succeeds = validateSucceeds [("", testSpec)]
