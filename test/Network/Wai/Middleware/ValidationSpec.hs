@@ -189,3 +189,6 @@ spec = do
 
             it "doesn't validate the request or response body unless it is json" $
                 succeeds (methodPost, "/articles", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")
+
+            it "always succeeds if the method is OPTIONS" $
+                succeeds (methodOptions, "/whatever", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")

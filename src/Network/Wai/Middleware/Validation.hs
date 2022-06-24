@@ -265,6 +265,9 @@ validatorMiddleware coverageRef vc app req sendResponse = do
         catchErrors vc (reqBody, req) (respBody, resp) $ do
             method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (Just methodNotAllowed405)) pure $
                 parseMethod $ Wai.requestMethod req
+            -- for OPTIONS anything goes really... TODO, fix that?
+            when (method == OPTIONS) $
+                throwError $ TopLevelError Nothing Nothing
             (path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (Just notFound404)) pure $
                 listToMaybe $ mapMaybe (\(prefix,spec) -> (,spec) . S8.unpack <$> S8.stripPrefix prefix (Wai.rawPathInfo req)) (configuredPrefixSpecPairs vc)
             let openApi = getOpenApi spec
@@ -382,14 +385,10 @@ validatorMiddleware coverageRef vc app req sendResponse = do
 
             liftIO $ logCoverage (configuredLog vc) =<<
                 addCoverage coverageRef definedPath method status reqContentType respContentType
-            -- for OPTIONS anything goes really... TODO, fix that?
-            if method == OPTIONS then
-                pure ()
-            else
-                throwError $ TopLevelError
-                    { requestError = either Just (\() -> Nothing) validateRequest
-                    , responseError = either (Just . over _1 (:[])) (\() -> Nothing) validateResponse
-                    }
+            throwError $ TopLevelError
+                { requestError = either Just (\() -> Nothing) validateRequest
+                , responseError = either (Just . over _1 (:[])) (\() -> Nothing) validateResponse
+                }
 
         sendResponse resp
 
