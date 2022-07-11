@@ -129,16 +129,18 @@ defaultRespHeaders = [("Content-Type", "application/json")]
 validateSucceeds :: [(BS.ByteString, OpenApi)] -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateSucceeds prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStatus, respHeaders, respBody) = do
     r <- newIORef $ CoverageMap Map.empty
-    void $ runSession
-      (srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody))
-      (mkValidator r (Log (\_ _ err -> print err >> stop) (\_ -> continue)) prefixSpecMap $ \_ resp -> resp $ responseLBS respStatus respHeaders (L.fromStrict respBody))
+    let req = srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody)
+    let resp = responseLBS respStatus respHeaders (L.fromStrict respBody)
+    let validator = mkValidator r (Log (\_ _ err -> print err >> stop) (\_ -> continue)) prefixSpecMap $ \_ respond -> respond resp
+    void $ runSession req validator
 
 validateFails :: [(BS.ByteString, OpenApi)] -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateFails prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStatus, respHeaders, respBody) = do
     r <- newIORef $ CoverageMap Map.empty
-    void $ runSession
-      (srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody))
-      (mkValidator r (Log (\_ _ _ -> stop) (\_ -> continue)) prefixSpecMap $ \_ resp -> resp $ responseLBS respStatus respHeaders (L.fromStrict respBody)) `shouldThrow` (\(_ :: PredicateFailed) -> True)
+    let req = srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody)
+    let resp = responseLBS respStatus respHeaders (L.fromStrict respBody)
+    let validator = mkValidator r (Log (\_ _ _ -> stop) (\_ -> continue)) prefixSpecMap $ \_ respond -> respond resp
+    void (runSession req validator) `shouldThrow` (\(_ :: PredicateFailed) -> True)
 
 validateCoverage :: [(BS.ByteString, OpenApi)] -> (CoverageMap -> IO ()) -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateCoverage prefixSpecMap coveragePred = undefined
@@ -147,7 +149,6 @@ spec :: Spec
 spec = do
     describe "Middleware" $ do
         let
-            mkApp response _ respond = respond response
             validResponseBody = [here| {"cint": 1, "ctxt": "RESPONSE"} |]
             invalidResponseBody = [here| {"cint": 1} |]
             validRequestBody = [here| {"cint": 1, "ctxt": "REQUEST"} |]
@@ -185,8 +186,8 @@ spec = do
             it "log if the response content type is unacceptable and response status is not 406" $
                 fails (methodPost, "/articles", [("Accept", "text/plain")], validRequestBody) (ok200, [], validResponseBody)
 
-            it "do nothing if the response content type is unacceptable and response status is not 406" $
-                fails (methodPost, "/articles", [("Accept", "text/plain")], validRequestBody) (notAcceptable406, [], "")
+            it "do nothing if the requested content type is unacceptable and response status is 406" $
+                succeeds (methodPost, "/articles", [("Accept", "unacceptable/type")], validRequestBody) (notAcceptable406, [], "")
 
             it "doesn't validate the request or response body unless it is json" $
                 succeeds (methodPost, "/articles", [("Content-Type", "fake/type")], "madeup") (created201, [("Content-Type", "fake/type")], "madeup")

@@ -38,7 +38,7 @@ library
                      , validation
                      , wai
   default-language:    Haskell2010
-  ghc-options: -fno-cse -fno-full-laziness
+  ghc-options: -Wall -Wno-missing-signatures -Wmissing-exported-signatures
 
 test-suite wai-middleware-validation-test
   type:                exitcode-stdio-1.0

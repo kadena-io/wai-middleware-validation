@@ -28,7 +28,6 @@ module Network.Wai.Middleware.Validation
     )
     where
 
-import Control.Applicative
 import Control.Exception
 import qualified Control.Exception.Safe as Safe
 import Control.Lens hiding ((.=), lazy)
@@ -45,21 +44,17 @@ import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.CaseInsensitive(CI)
 import qualified Data.CaseInsensitive as CI
-import Data.Either
 import Data.Foldable
-import Data.HashMap.Strict.InsOrd (InsOrdHashMap, keys)
+import Data.HashMap.Strict.InsOrd (keys)
 import qualified Data.HashMap.Strict.InsOrd as InsOrdHashMap
 import Data.IORef
-import Data.List
 import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.String
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.These
-import Data.Typeable
 import Data.Validation
-import GHC.Exts
 import GHC.Generics hiding (to)
 import Network.HTTP.Media
 import Network.HTTP.Types
@@ -74,8 +69,8 @@ import qualified Data.OpenApi.Schema.Generator as OA
 
 data TopLevelError
     = TopLevelError
-    { requestError :: !(Maybe ([String], Maybe Status))
-    , responseError :: !(Maybe ([String], Maybe Status))
+    { requestError :: !(Maybe ([String], Status -> Bool))
+    , responseError :: !(Maybe ([String], Status -> Bool))
     }
 
 instance Show TopLevelError where
@@ -101,7 +96,7 @@ instance Aeson.ToJSON MaybeStatus where
 instance Aeson.ToJSONKey MaybeStatus where
     toJSONKey = Aeson.toJSONKeyText maybeStatusToText
 
--- the shape of the CoverageMap must be populated by the initialCoverageMap,
+-- the shape of the CoverageMap must be populated by the initialCoverageMap.
 -- attempting to add keys during operation is treated as an error.
 newtype CoverageMap = CoverageMap (M.Map FilePath EndpointCoverage)
     deriving (Eq, Show, Generic, Aeson.ToJSON)
@@ -233,25 +228,28 @@ deref openApi l c = OA.dereference (openApi ^. OA.components . l) c
 
 catchErrors :: ValidatorConfiguration -> (L.ByteString, Wai.Request) -> (L.ByteString, Wai.Response) -> ExceptT TopLevelError IO () -> IO ()
 catchErrors vc req res act = do
-    err <- either id (\() -> TopLevelError Nothing Nothing) <$> (runExceptT act) `Safe.catch`
-        \(ex :: SomeException) -> return $ Left $ mkRequestError ("unexpected error: " <> show ex) Nothing
-    let
-        fatalError (Just (msgs, Just recoveryStatus)) =
-            statusCode (Wai.responseStatus (snd res)) /= statusCode recoveryStatus
-        fatalError (Just (_, Nothing)) =
-            True
-        fatalError Nothing = False
+    err <- either id (\() -> TopLevelError Nothing Nothing) <$> runExceptT act `Safe.catch`
+        \(ex :: SomeException) -> return $ Left $ TopLevelError
+            { requestError = Just (["unexpected error: " <> show ex], const False)
+            , responseError = Nothing
+            }
     case (requestError err, responseError err) of
-        (Just (_, Just recoveryStatus), _) | statusCode (Wai.responseStatus (snd res)) == statusCode recoveryStatus ->
+        -- a special case: a request compliance error that triggers the correct
+        -- error response merits ignoring any response compliance error.  it's
+        -- tempting to be more specific than this and ignore compliance errors
+        -- whenever we have an error response code, but there are some special
+        -- error cases specific to endpoints that we still (seem to) want to
+        -- validate.
+        (Just (_, statusRecovers), _) | statusRecovers (Wai.responseStatus (snd res)) ->
             return ()
-        (Nothing, Just (respErr, Just recoveryStatus)) | statusCode (Wai.responseStatus (snd res)) == statusCode recoveryStatus ->
+        (Nothing, Just (_, statusRecovers)) | statusRecovers (Wai.responseStatus (snd res)) ->
             return ()
         (Nothing, Nothing) ->
             return ()
         _ ->
             logViolation (configuredLog vc) req res err
 
-mkRequestError :: String -> Maybe Status -> TopLevelError
+mkRequestError :: String -> (Status -> Bool) -> TopLevelError
 mkRequestError msg st = TopLevelError
     { requestError = Just ([msg], st)
     , responseError = Nothing
@@ -263,14 +261,14 @@ validatorMiddleware coverageRef vc app req sendResponse = do
     app newReq $ \resp -> do
         respBody <- unsafeInterleaveIO $ getResponseBody resp
         catchErrors vc (reqBody, req) (respBody, resp) $ do
-            method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (Just methodNotAllowed405)) pure $
+            method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (== methodNotAllowed405)) pure $
                 parseMethod $ Wai.requestMethod req
-            (path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (Just notFound404)) pure $
+            (path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (== notFound404)) pure $
                 listToMaybe $ mapMaybe (\(prefix,spec) -> (,spec) . S8.unpack <$> S8.stripPrefix prefix (Wai.rawPathInfo req)) (configuredPrefixSpecPairs vc)
             let openApi = getOpenApi spec
-            definedPath <- maybe (throwError $ mkRequestError ("no such path: " <> path) (Just notFound404)) pure $
+            definedPath <- maybe (throwError $ mkRequestError ("no such path: " <> path) (== notFound404)) pure $
                 lookupDefinedPath path $ getPathMap spec
-            pathItem <- maybe (throwError $ mkRequestError "pathItem: PathMap inaccurate, report this as a bug" Nothing) pure $
+            pathItem <- maybe (throwError $ mkRequestError "pathItem: PathMap inaccurate, report this as a bug" (const False)) pure $
                 openApi ^? OA.paths . at definedPath . _Just
             -- for OPTIONS anything goes as long as the path exists. TODO: check the contents of the response.
             when (method == OPTIONS) $
@@ -282,16 +280,20 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 fabricatedHeadOperation =
                     OA._pathItemGet pathItem &
                         _Just . OA.responses . Unsound.adjoin (OA.responses . traversed) (OA.default_ . _Just) %~
-                            (\resp -> OA.Inline $ deref openApi OA.responses resp & OA.content . mapped . OA.schema .~ Nothing)
+                            (\schemaResp -> OA.Inline $ deref openApi OA.responses schemaResp & OA.content . mapped . OA.schema .~ Nothing)
 
-            operation <- maybe (throwError $ mkRequestError ("no such method for that path; legal methods are " <> show legalMethods) (Just methodNotAllowed405)) pure $ asum
+            operation <- maybe (throwError $ mkRequestError ("no such method for that path; legal methods are " <> show legalMethods) (== methodNotAllowed405)) pure $ asum
                 [ operationForMethod method pathItem
                 , guard (method == HEAD) *> fabricatedHeadOperation
                 ]
             let
                 reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
                 respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
-                validateRequest = do
+                status = statusCode $ Wai.responseStatus resp
+                legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
+                maybeAcceptableMediaTypes =
+                    fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
+                validateRequest =
                     let
                         validateReqSchema = fromEither $ do
                             if elem method [POST, PUT] && contentTypeIsJson reqContentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
@@ -331,31 +333,50 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                                             OA._paramSchema param
                                         let
                                             validateRaw =
-                                                over _Left (paramError k) $ validateJsonDocument openApi paramSchema (L.fromStrict value)
+                                                validateJsonDocument openApi paramSchema (L.fromStrict value)
                                             validateQuoted =
-                                                over _Left (paramError k) $ validateJsonDocument openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
+                                                validateJsonDocument openApi paramSchema (L.fromStrict $ fold ["\"", value, "\""])
                                         -- query parameters are usually not valid JSON
                                         -- because they lack quotes, so we add them in if
                                         -- necessary, though we strip them out again if both
                                         -- fail for a better error message.
-                                        case validateRaw of
-                                            Left x -> case validateQuoted of
-                                                Left _ -> Left x
+                                        over _Left (paramError k) $
+                                            case validateRaw of
+                                                Left x -> case validateQuoted of
+                                                    Left _ -> Left x
+                                                    r -> r
                                                 r -> r
-                                            r -> r
                             in
                                 traverse_ snd $ M.toList $ M.mapWithKey checkQueryParam $ align (M.fromList $ Wai.queryString req) (M.fromList expectedQueryParams)
-                    case (validateReqSchema, validateQueryParams) of
-                        -- fatal error, unrecoverable by a 400 status
-                        (Failure (bodyErrs, False), Failure _) -> Left (bodyErrs, Nothing)
-                        (Failure (bodyErrs, True), paramErrs) ->
-                            Left (bodyErrs <> validation id (const []) paramErrs, Just badRequest400)
-                        (Success (), paramErrs) -> toEither $ over _Failure (,Just badRequest400) paramErrs
-                status = statusCode $ Wai.responseStatus resp
-                legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
+                        validateRequestIsReasonable = case maybeAcceptableMediaTypes of
+                            Nothing -> Right ()
+                            Just [] -> Right ()
+                            Just acceptableMediaTypes ->
+                                let
+                                    -- we can't perfectly detect correct content type negotiation
+                                    -- (specifically when it's appropriate to return 406) because we
+                                    -- don't know which status code would have been appropriate to
+                                    -- return if not for a failed content type negotiation, and that
+                                    -- status code would tell us which content types were legal.  to
+                                    -- get around that, we assume all content types belonging to
+                                    -- successful status codes are valid.
+                                    allSuccessfulStatusCodes = [ c | c <- legalStatusCodes, 200 <= c, c < 300 ]
+                                    allLegalContentTypes = operation ^. OA.responses . foldr (<>) OA.default_ (at <$> allSuccessfulStatusCodes) . _Just . to (deref openApi OA.responses) . OA.content . to keys
+                                in if all (\candidate -> not (any (\legal -> legal `moreSpecificThan` candidate || legal == candidate) allLegalContentTypes)) acceptableMediaTypes
+                                then Left (["server has no acceptable content types to return but there was no 406 response"], (== notAcceptable406))
+                                else Right ()
+                        schemaParamError =
+                            case (validateReqSchema, validateQueryParams) of
+                                -- fatal error, unrecoverable by a 400 status
+                                (Failure (bodyErrs, False), _) -> Left (bodyErrs, const False)
+                                (Failure (bodyErrs, True), paramErrs) ->
+                                    Left (bodyErrs <> validation id (const []) paramErrs, (== badRequest400))
+                                (Success (), paramErrs) -> toEither $ over _Failure (,(== badRequest400)) paramErrs
+                    in
+                        schemaParamError >> validateRequestIsReasonable
                 validateResponse = do
                     (deref openApi OA.responses -> specResp) <-
-                        maybe (Left ("no response for that status code; legal status codes are " <> show legalStatusCodes, Nothing)) Right $ asum
+                        maybe (Left ("no response for that status code; legal status codes are " <> show legalStatusCodes, const False)) Right $ asum
                             [ operation ^. OA.responses . at status
                             , operation ^. OA.responses . OA.default_
                             ]
@@ -364,24 +385,22 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                         validateRespSchema =
                             if contentTypeIsJson respContentType && (null (specResp ^? OA.content) || not (L.null respBody))
                             then do
-                                content <- maybe (Left ("no content type for that response; legal content types are " <> show legalContentTypes, Nothing)) Right $
+                                content <- maybe (Left ("no content type for that response; legal content types are " <> show legalContentTypes, const False)) Right $
                                     specResp ^? OA.content . at respContentType . _Just
-                                schema <- maybe (Left ("no schema for that content", Nothing)) Right $
+                                schema <- maybe (Left ("no schema for that content", const False)) Right $
                                     content ^? OA.schema . _Just
-                                over _Left (\e -> ("error validating response body: " <> e, Nothing)) $ validateJsonDocument openApi schema respBody
+                                over _Left (\e -> ("error validating response body: " <> e, const False)) $ validateJsonDocument openApi schema respBody
                             else Right ()
-                        maybeAcceptableMediaTypes =
-                            fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
-                        validateResponseContentTypeNegotiation = case maybeAcceptableMediaTypes of
+                        validateResponseContentTypeAcceptable = case maybeAcceptableMediaTypes of
                             Nothing -> Right ()
                             Just [] -> Right ()
                             Just acceptableMediaTypes ->
-                                if null (acceptableMediaTypes `union` legalContentTypes)
-                                then Left ("server has no acceptable content types to return but there was no 406 response", Just notAcceptable406)
-                                else if any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes
+                                if any (\candidate -> respContentType `moreSpecificThan` candidate || respContentType == candidate) acceptableMediaTypes
                                 then Right ()
-                                else Left ("server responded with an unacceptable content type", Nothing)
-                    validateResponseContentTypeNegotiation >> validateRespSchema
+                                -- content type negotiation is irrelevant during other errors.
+                                else Left ("server responded with an unacceptable content type", \s -> statusCode s >= 400 && statusCode s < 600)
+
+                    validateResponseContentTypeAcceptable >> validateRespSchema
 
             liftIO $ logCoverage (configuredLog vc) =<<
                 addCoverage coverageRef definedPath method status reqContentType respContentType
@@ -394,11 +413,11 @@ validatorMiddleware coverageRef vc app req sendResponse = do
 
 initialCoverageMap :: OA.OpenApi -> CoverageMap
 initialCoverageMap openApi = CoverageMap $ M.fromList
-    (InsOrdHashMap.toList $ openApi ^. OA.paths) <&> \pi -> EndpointCoverage (M.fromList
+    (InsOrdHashMap.toList $ openApi ^. OA.paths) <&> \p -> EndpointCoverage (M.fromList
         [ (T.decodeUtf8 $ renderStdMethod meth,
             ( RequestCoverage $ M.fromList
                 [ (normalizeMediaType mediaType, 0)
-                | Just req <- [op ^. OA.requestBody]
+                | Just req <- [o ^. OA.requestBody]
                 , (mediaType, _) <- InsOrdHashMap.toList $ deref openApi OA.requestBodies req ^. OA.content
                 ]
             , ResponseCoverage $ M.fromList
@@ -411,9 +430,9 @@ initialCoverageMap openApi = CoverageMap $ M.fromList
                 ]
             ))
         | meth <- [DELETE, GET, PATCH, POST, PUT]
-        , Just op <- [operationForMethod meth pi]
+        , Just o <- [operationForMethod meth p]
         , let
-            resps = op ^. OA.responses
+            resps = o ^. OA.responses
         ])
 
 addCoverage :: IORef CoverageMap -> FilePath -> StdMethod -> Int -> MediaType -> MediaType -> IO CoverageMap
