@@ -133,7 +133,7 @@ data Log = Log
     }
 
 data ValidatorConfiguration = ValidatorConfiguration
-    { configuredPrefixSpecPairs :: ![(BS.ByteString, ApiDefinition)]
+    { configuredPathMapping :: !(BS.ByteString -> Maybe (BS.ByteString, ApiDefinition))
     , configuredLog :: !Log
     }
 
@@ -189,11 +189,11 @@ toApiDefinition openApi =
     pathMap = makePathMap (keys $ openApi ^. OA.paths)
 
 -- | Make a middleware for Request/Response validation.
-mkValidator :: IORef CoverageMap -> Log -> [(S8.ByteString, OA.OpenApi)] -> Wai.Middleware
-mkValidator coverageRef lg prefixSpecMap =
+mkValidator :: IORef CoverageMap -> Log -> (S8.ByteString -> Maybe (S8.ByteString, OA.OpenApi)) -> Wai.Middleware
+mkValidator coverageRef lg pathfinder =
     validatorMiddleware coverageRef mValidatorConfig
   where
-    mValidatorConfig = ValidatorConfiguration [(prefix, toApiDefinition spec) | (prefix, spec) <- prefixSpecMap] lg
+    mValidatorConfig = ValidatorConfiguration (over (mapped._Just._2) toApiDefinition pathfinder) lg
 
 contentTypeIsJson :: MediaType -> Bool
 contentTypeIsJson ty =
@@ -263,8 +263,9 @@ validatorMiddleware coverageRef vc app req sendResponse = do
         catchErrors vc (reqBody, req) (respBody, resp) $ do
             method <- either (\err -> throwError $ mkRequestError ("non-standard HTTP method: " <> show err) (== methodNotAllowed405)) pure $
                 parseMethod $ Wai.requestMethod req
-            (path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (== notFound404)) pure $
-                listToMaybe $ mapMaybe (\(prefix,spec) -> (,spec) . S8.unpack <$> S8.stripPrefix prefix (Wai.rawPathInfo req)) (configuredPrefixSpecPairs vc)
+            (S8.unpack -> path, spec) <- maybe (throwError $ mkRequestError ("path prefix not in path: " <> show (Wai.rawPathInfo req)) (== notFound404)) pure $
+                configuredPathMapping vc (Wai.rawPathInfo req)
+                -- listToMaybe $ mapMaybe (\(prefix,spec) -> (,spec) . S8.unpack <$> S8.stripPrefix prefix (Wai.rawPathInfo req)) (configuredPrefixSpecPairs vc)
             let openApi = getOpenApi spec
             definedPath <- maybe (throwError $ mkRequestError ("no such path: " <> path) (== notFound404)) pure $
                 lookupDefinedPath path $ getPathMap spec
