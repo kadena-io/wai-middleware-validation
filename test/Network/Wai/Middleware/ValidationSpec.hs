@@ -4,7 +4,6 @@
 
 module Network.Wai.Middleware.ValidationSpec (spec) where
 
-import Control.Exception
 import Control.Monad(forM_)
 import Control.Monad.IO.Class(liftIO)
 import Data.Aeson
@@ -126,7 +125,7 @@ testSpec = fromJust $ decode $ [here|
 
 defaultRespHeaders = [("Content-Type", "application/json")]
 
-validateSucceeds :: [(BS.ByteString, OpenApi)] -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
+validateSucceeds :: (BS.ByteString -> Maybe (BS.ByteString, OpenApi)) -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateSucceeds prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStatus, respHeaders, respBody) = do
     r <- newIORef $ CoverageMap Map.empty
     let req = srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody)
@@ -134,7 +133,7 @@ validateSucceeds prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStat
     let validator = mkValidator r (Log (\_ _ err -> print err >> stop) (\_ -> continue)) prefixSpecMap $ \_ respond -> respond resp
     void $ runSession req validator
 
-validateFails :: [(BS.ByteString, OpenApi)] -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
+validateFails :: (BS.ByteString -> Maybe (BS.ByteString, OpenApi)) -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateFails prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStatus, respHeaders, respBody) = do
     r <- newIORef $ CoverageMap Map.empty
     let req = srequest $ SRequest (setPath (defaultRequest { requestMethod = reqMeth, requestHeaders = reqHeaders }) (BSC.pack reqPath)) (L.fromStrict reqBody)
@@ -142,7 +141,7 @@ validateFails prefixSpecMap (reqMeth, reqPath, reqHeaders, reqBody) (respStatus,
     let validator = mkValidator r (Log (\_ _ _ -> stop) (\_ -> continue)) prefixSpecMap $ \_ respond -> respond resp
     void (runSession req validator) `shouldThrow` (\(_ :: PredicateFailed) -> True)
 
-validateCoverage :: [(BS.ByteString, OpenApi)] -> (CoverageMap -> IO ()) -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
+validateCoverage :: (BS.ByteString -> Maybe (BS.ByteString, OpenApi)) -> (CoverageMap -> IO ()) -> (Method, FilePath, RequestHeaders, BS.ByteString) -> (Status, ResponseHeaders, BS.ByteString) -> IO ()
 validateCoverage prefixSpecMap coveragePred = undefined
 
 spec :: Spec
@@ -153,8 +152,8 @@ spec = do
             invalidResponseBody = [here| {"cint": 1} |]
             validRequestBody = [here| {"cint": 1, "ctxt": "REQUEST"} |]
             invalidRequestBody = [here| {"cint": 1, "ctxt": 0} |]
-            succeeds = validateSucceeds [("", testSpec)]
-            fails = validateFails [("", testSpec)]
+            succeeds = validateSucceeds (\p -> Just (p, testSpec))
+            fails = validateFails (\p -> Just (p, testSpec))
             contentTypeJson = ("Content-Type", "application/json")
 
         context "request and response validation" $ do

@@ -412,29 +412,33 @@ validatorMiddleware coverageRef vc app req sendResponse = do
 
         sendResponse resp
 
-initialCoverageMap :: OA.OpenApi -> CoverageMap
-initialCoverageMap openApi = CoverageMap $ M.fromList
-    (InsOrdHashMap.toList $ openApi ^. OA.paths) <&> \p -> EndpointCoverage (M.fromList
-        [ (T.decodeUtf8 $ renderStdMethod meth,
-            ( RequestCoverage $ M.fromList
-                [ (normalizeMediaType mediaType, 0)
-                | Just req <- [o ^. OA.requestBody]
-                , (mediaType, _) <- InsOrdHashMap.toList $ deref openApi OA.requestBodies req ^. OA.content
-                ]
-            , ResponseCoverage $ M.fromList
-                [ (status, M.fromList
+initialCoverageMap :: [OA.OpenApi] -> CoverageMap
+initialCoverageMap specs =
+    CoverageMap $ M.unions $
+    [ M.fromList
+        (InsOrdHashMap.toList $ spec ^. OA.paths) <&> \p -> EndpointCoverage (M.fromList
+            [ (T.decodeUtf8 $ renderStdMethod meth,
+                ( RequestCoverage $ M.fromList
                     [ (normalizeMediaType mediaType, 0)
-                    | (mediaType, _) <- content
-                    ])
-                | (status, resp) <- maybeToList ((StatusDefault,) <$> OA._responsesDefault resps) ++ over (mapped._1) StatusInt (InsOrdHashMap.toList (OA._responsesResponses resps))
-                , let content = InsOrdHashMap.toList $ deref openApi OA.responses resp ^. OA.content
-                ]
-            ))
-        | meth <- [DELETE, GET, PATCH, POST, PUT]
-        , Just o <- [operationForMethod meth p]
-        , let
-            resps = o ^. OA.responses
-        ])
+                    | Just req <- [o ^. OA.requestBody]
+                    , (mediaType, _) <- InsOrdHashMap.toList $ deref spec OA.requestBodies req ^. OA.content
+                    ]
+                , ResponseCoverage $ M.fromList
+                    [ (status, M.fromList
+                        [ (normalizeMediaType mediaType, 0)
+                        | (mediaType, _) <- content
+                        ])
+                    | (status, resp) <- maybeToList ((StatusDefault,) <$> OA._responsesDefault resps) ++ over (mapped._1) StatusInt (InsOrdHashMap.toList (OA._responsesResponses resps))
+                    , let content = InsOrdHashMap.toList $ deref spec OA.responses resp ^. OA.content
+                    ]
+                ))
+            | meth <- [DELETE, GET, PATCH, POST, PUT]
+            , Just o <- [operationForMethod meth p]
+            , let
+                resps = o ^. OA.responses
+            ])
+    | spec <- specs
+    ]
 
 addCoverage :: IORef CoverageMap -> FilePath -> StdMethod -> Int -> MediaType -> MediaType -> IO CoverageMap
 addCoverage coverageTracker path method status reqContentType respContentType =
