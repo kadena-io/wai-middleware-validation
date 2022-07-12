@@ -362,7 +362,7 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                                     -- get around that, we assume all content types belonging to
                                     -- successful status codes are valid.
                                     allSuccessfulStatusCodes = [ c | c <- legalStatusCodes, 200 <= c, c < 300 ]
-                                    allLegalContentTypes = operation ^. OA.responses . foldr (<>) OA.default_ (at <$> allSuccessfulStatusCodes) . _Just . to (deref openApi OA.responses) . OA.content . to keys
+                                    allLegalContentTypes = operation ^. OA.responses . foldr (\k l -> at k <> l) OA.default_ allSuccessfulStatusCodes . _Just . to (deref openApi OA.responses) . OA.content . to keys
                                 in if all (\candidate -> not (any (\legal -> legal `moreSpecificThan` candidate || legal == candidate) allLegalContentTypes)) acceptableMediaTypes
                                 then Left (["server has no acceptable content types to return but there was no 406 response"], (== notAcceptable406))
                                 else Right ()
