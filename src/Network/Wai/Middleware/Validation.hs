@@ -288,24 +288,23 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                 , guard (method == HEAD) *> fabricatedHeadOperation
                 ]
             let
-                reqContentType = normalizeMediaType $ getContentType (Wai.requestHeaders req)
-                respContentType = normalizeMediaType $ getContentType (Wai.responseHeaders resp)
+                reqContentType = normalizeMediaType $ getRequestContentType (Wai.requestHeaders req)
+                respContentType = normalizeMediaType $ getResponseContentType (Wai.responseStatus resp) (Wai.responseHeaders resp)
                 status = statusCode $ Wai.responseStatus resp
                 legalStatusCodes = operation ^. OA.responses . to OA._responsesResponses . to keys
                 maybeAcceptableMediaTypes =
                     fmap (normalizeMediaType . fromString . S8.unpack) . S8.split ',' <$> lookup hAccept (Wai.requestHeaders req)
                 validateRequest =
                     let
-                        validateReqSchema = fromEither $ do
-                            if elem method [POST, PUT] && contentTypeIsJson reqContentType && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))
-                            then do
+                        validateReqSchema =
+                            when (elem method [POST, PUT] && (isJust (operation ^. OA.requestBody) || not (L.null reqBody))) $ do
                                 specReqBody <- fmap (deref openApi OA.requestBodies) $
-                                    maybe (Left (["no specified request body for that method"], False)) Right $
+                                    maybe (Left (["no specified request body for that method"], Nothing)) Right $
                                         operation ^. OA.requestBody
-                                reqSchema <- maybe (Left (["no schema for that request"], False)) Right $
+                                reqSchema <- maybe (Left (["no schema for that request"], Just (== unsupportedMediaType415))) Right $
                                     specReqBody ^? OA.content . at reqContentType . _Just . OA.schema . _Just
-                                over _Left (\e -> (["error validating request body: " <> e], True)) $ validateJsonDocument openApi reqSchema reqBody
-                            else Right ()
+                                when (contentTypeIsJson reqContentType) $
+                                    over _Left (\e -> (["error validating request body: " <> e], Just (== badRequest400))) $ validateJsonDocument openApi reqSchema reqBody
                         expectedQueryParams =
                             [ (T.encodeUtf8 $ OA._paramName dp, dp)
                             | p <- operation ^. OA.parameters
@@ -367,11 +366,11 @@ validatorMiddleware coverageRef vc app req sendResponse = do
                                 then Left (["server has no acceptable content types to return but there was no 406 response"], (== notAcceptable406))
                                 else Right ()
                         schemaParamError =
-                            case (validateReqSchema, validateQueryParams) of
+                            case (fromEither validateReqSchema, validateQueryParams) of
                                 -- fatal error, unrecoverable by a 400 status
-                                (Failure (bodyErrs, False), _) -> Left (bodyErrs, const False)
-                                (Failure (bodyErrs, True), paramErrs) ->
-                                    Left (bodyErrs <> validation id (const []) paramErrs, (== badRequest400))
+                                (Failure (bodyErrs, Nothing), _) -> Left (bodyErrs, const False)
+                                (Failure (bodyErrs, Just r), paramErrs) ->
+                                    Left (bodyErrs <> validation id (const []) paramErrs, r)
                                 (Success (), paramErrs) -> toEither $ over _Failure (,(== badRequest400)) paramErrs
                     in
                         schemaParamError >> validateRequestIsReasonable
@@ -483,10 +482,20 @@ operationForMethod POST = OA._pathItemPost
 operationForMethod PUT = OA._pathItemPut
 operationForMethod _ = const Nothing
 
-getContentType :: [Header] -> MediaType
-getContentType headers =
+getRequestContentType :: [Header] -> MediaType
+getRequestContentType headers =
     fromMaybe "application/json" $
         fromString . S8.unpack <$> lookup hContentType headers
+
+getResponseContentType :: Status -> [Header] -> MediaType
+getResponseContentType status headers =
+    fromMaybe defaultType $
+        fromString . S8.unpack <$> lookup hContentType headers
+    where
+    defaultType =
+        if 400 <= statusCode status && statusCode status <= 600
+        then "text/plain"
+        else "application/json"
 
 validateJsonDocument :: OA.OpenApi -> OA.Referenced OA.Schema -> L.ByteString -> Either String ()
 validateJsonDocument openApi bodySchema dataJson = do
