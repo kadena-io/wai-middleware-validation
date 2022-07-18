@@ -15,7 +15,6 @@ import Data.Functor
 import Data.IORef
 import qualified Data.Map as Map
 import Data.Maybe
-import Data.OpenApi(OpenApi)
 import Data.String.Here                  (here)
 import Network.HTTP.Types
 import Network.Wai
@@ -23,11 +22,12 @@ import Network.Wai.Test
 import Test.Hspec
 
 import Network.Wai.Middleware.Validation
+import Network.Wai.Middleware.OpenApi
 
 import PredicateTransformers
 
 testSpec :: OpenApi
-testSpec = fromJust $ decode $ [here|
+testSpec = either (error.show) id $ eitherDecode $ [here|
 {
     "openapi": "3.0.0",
     "info": { "title": "validator test", "version": "1.0.0" },

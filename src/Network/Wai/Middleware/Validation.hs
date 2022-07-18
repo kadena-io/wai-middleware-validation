@@ -63,9 +63,10 @@ import System.FilePath (splitDirectories)
 import System.IO.Unsafe (unsafeInterleaveIO)
 import Text.Regex.TDFA
 
-import qualified Data.OpenApi as OA
+import qualified Network.Wai.Middleware.OpenApi as OA
+-- import qualified Data.OpenApi as OA
 
-import qualified Data.OpenApi.Schema.Generator as OA
+-- import qualified Data.OpenApi.Schema.Generator as OA
 
 data TopLevelError
     = TopLevelError
