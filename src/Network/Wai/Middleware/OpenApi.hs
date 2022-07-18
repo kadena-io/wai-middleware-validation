@@ -1794,9 +1794,19 @@ instance FromJSON Server where
         <*> o .:? "description"
         <*> o .:? "variables" .!= mempty
 
+instance FromJSON Header where
+    parseJSON = withObject "Header" $ \o -> Header
+        <$> o .:? "description"
+        <*> o .:? "required"
+        <*> o .:? "deprecated"
+        <*> o .:? "allowEmptyValue"
+        <*> o .:? "explode"
+        <*> o .:? "example"
+        <*> o .:? "examples" .!= mempty
+        <*> o .:? "schema"
+
 fold <$> sequence
     [ deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_securityScheme" :: String)) } ''SecurityScheme
-    , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_header" :: String)) } ''Header
     , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_example" :: String)) } ''Example
     , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_requestBody" :: String)) } ''RequestBody
     , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_link" :: String)) } ''Link
