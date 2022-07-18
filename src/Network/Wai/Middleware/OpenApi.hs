@@ -1788,9 +1788,14 @@ instance FromJSON Components where
         <*> o .:? "links" .!= mempty
         <*> o .:? "callbacks" .!= mempty
 
+instance FromJSON Server where
+    parseJSON = withObject "Server" $ \o -> Server
+        <$> o .: "url"
+        <*> o .:? "description"
+        <*> o .:? "variables" .!= mempty
+
 fold <$> sequence
-    [ deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_server" :: String)) } ''Server
-    , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_securityScheme" :: String)) } ''SecurityScheme
+    [ deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_securityScheme" :: String)) } ''SecurityScheme
     , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_header" :: String)) } ''Header
     , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_example" :: String)) } ''Example
     , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_requestBody" :: String)) } ''RequestBody
