@@ -8,10 +8,10 @@ import Language.Haskell.TH   (mkName)
 import           Data.Aeson        (Key)
 import qualified Data.Aeson.Key    as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import           Data.Bifunctor             (first)
 #else
 import qualified Data.HashMap.Strict as HM
 #endif
-import           Data.Bifunctor             (first)
 import qualified Data.HashMap.Strict.InsOrd as InsOrdHashMap
 import qualified Data.Text                  as T
 

@@ -29,6 +29,8 @@ import           Control.Monad
 import           Data.Aeson            hiding (Encoding, Result(..))
 #if MIN_VERSION_aeson(2,0,0)
 import qualified Data.Aeson.KeyMap     as KeyMap
+#else
+import           Data.HashMap.Strict   (HashMap)
 #endif
 import           Data.Aeson.TH
 import qualified Data.Aeson.Types      as JSON
