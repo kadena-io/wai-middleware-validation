@@ -45,8 +45,8 @@ import qualified Data.ByteString.Lazy as L
 import Data.CaseInsensitive(CI)
 import qualified Data.CaseInsensitive as CI
 import Data.Foldable
-import Data.HashMap.Strict.InsOrd (keys)
-import qualified Data.HashMap.Strict.InsOrd as InsOrdHashMap
+import Data.HashMap.Strict (keys)
+import qualified Data.HashMap.Strict as HashMap
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Maybe
@@ -416,20 +416,20 @@ initialCoverageMap :: [OA.OpenApi] -> CoverageMap
 initialCoverageMap specs =
     CoverageMap $ M.unions $
     [ M.fromList
-        (InsOrdHashMap.toList $ spec ^. OA.paths) <&> \p -> EndpointCoverage (M.fromList
+        (HashMap.toList $ spec ^. OA.paths) <&> \p -> EndpointCoverage (M.fromList
             [ (T.decodeUtf8 $ renderStdMethod meth,
                 ( RequestCoverage $ M.fromList
                     [ (normalizeMediaType mediaType, 0)
                     | Just req <- [o ^. OA.requestBody]
-                    , (mediaType, _) <- InsOrdHashMap.toList $ deref spec OA.requestBodies req ^. OA.content
+                    , (mediaType, _) <- HashMap.toList $ deref spec OA.requestBodies req ^. OA.content
                     ]
                 , ResponseCoverage $ M.fromList
                     [ (status, M.fromList
                         [ (normalizeMediaType mediaType, 0)
                         | (mediaType, _) <- content
                         ])
-                    | (status, resp) <- maybeToList ((StatusDefault,) <$> OA._responsesDefault resps) ++ over (mapped._1) StatusInt (InsOrdHashMap.toList (OA._responsesResponses resps))
-                    , let content = InsOrdHashMap.toList $ deref spec OA.responses resp ^. OA.content
+                    | (status, resp) <- maybeToList ((StatusDefault,) <$> OA._responsesDefault resps) ++ over (mapped._1) StatusInt (HashMap.toList (OA._responsesResponses resps))
+                    , let content = HashMap.toList $ deref spec OA.responses resp ^. OA.content
                     ]
                 ))
             | meth <- [DELETE, GET, PATCH, POST, PUT]

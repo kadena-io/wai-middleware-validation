@@ -28,7 +28,6 @@ library
                     , hashable
                     , http-media >= 0.8
                     , http-types
-                    , insert-ordered-containers
                     , lens
                     , mtl
                     , network

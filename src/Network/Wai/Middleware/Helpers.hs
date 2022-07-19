@@ -9,10 +9,8 @@ import           Data.Aeson        (Key)
 import qualified Data.Aeson.Key    as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import           Data.Bifunctor             (first)
-#else
-import qualified Data.HashMap.Strict as HM
 #endif
-import qualified Data.HashMap.Strict.InsOrd as InsOrdHashMap
+import qualified Data.HashMap.Strict as HM
 import qualified Data.Text                  as T
 
 swaggerFieldRules :: LensRules
@@ -55,12 +53,6 @@ keyToString = Key.toString
 keyToText :: Key -> T.Text
 keyToText = Key.toText
 
-toInsOrdHashMap :: KeyMap.KeyMap v -> InsOrdHashMap.InsOrdHashMap T.Text v
-toInsOrdHashMap = InsOrdHashMap.fromList . fmap (first Key.toText) . KeyMap.toList
-
-fromInsOrdHashMap :: InsOrdHashMap.InsOrdHashMap T.Text v -> KeyMap.KeyMap v
-fromInsOrdHashMap = KeyMap.fromList . fmap (first Key.fromText) . InsOrdHashMap.toList
-
 lookupKey :: T.Text -> KeyMap.KeyMap v -> Maybe v
 lookupKey = KeyMap.lookup . Key.fromText
 
@@ -84,12 +76,6 @@ keyToString = T.unpack
 
 keyToText :: T.Text -> T.Text
 keyToText = id
-
-toInsOrdHashMap :: HM.HashMap T.Text v -> InsOrdHashMap.InsOrdHashMap T.Text v
-toInsOrdHashMap = InsOrdHashMap.fromHashMap
-
-fromInsOrdHashMap :: InsOrdHashMap.InsOrdHashMap T.Text v -> HM.HashMap T.Text v
-fromInsOrdHashMap = InsOrdHashMap.toHashMap
 
 lookupKey :: T.Text -> HM.HashMap T.Text v -> Maybe v
 lookupKey = HM.lookup

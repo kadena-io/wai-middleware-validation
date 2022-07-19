@@ -30,7 +30,6 @@ import           Data.Aeson            hiding (Encoding, Result(..))
 #if MIN_VERSION_aeson(2,0,0)
 import qualified Data.Aeson.KeyMap     as KeyMap
 #else
-import           Data.HashMap.Strict   (HashMap)
 #endif
 import           Data.Aeson.TH
 import qualified Data.Aeson.Types      as JSON
@@ -39,8 +38,10 @@ import           Data.Foldable
 import           Data.Data             (Constr, Data (..), DataType, Fixity (..), Typeable,
                                         constrIndex, mkConstr, mkDataType)
 import           Data.Hashable         (Hashable (..))
-import           Data.HashSet.InsOrd   (InsOrdHashSet)
-import qualified Data.HashSet.InsOrd   as InsOrdHashSet
+import           Data.HashMap.Strict   (HashMap)
+import qualified Data.HashMap.Strict   as HashMap
+import           Data.HashSet          (HashSet)
+import qualified Data.HashSet          as HashSet
 import           Data.List             (intersect)
 import qualified Data.Map              as Map
 import           Data.Maybe
@@ -55,9 +56,6 @@ import           GHC.Generics          (Generic)
 import GHC.Stack
 import           Network.HTTP.Media    hiding (Encoding)
 import qualified Debug.Trace           as Debug
-
-import           Data.HashMap.Strict.InsOrd (InsOrdHashMap)
-import qualified Data.HashMap.Strict.InsOrd as InsOrdHashMap
 
 import           Network.Wai.Middleware.Helpers
 
@@ -84,7 +82,7 @@ jsonPrefix prefix = defaultOptions
 -- >>> import Data.OpenApi.Internal.Utils
 
 -- | A list of definitions that can be used in references.
-type Definitions = InsOrdHashMap Text
+type Definitions = HashMap Text
 
 -- | This is the root document object for the API specification.
 data OpenApi = OpenApi
@@ -98,7 +96,7 @@ data OpenApi = OpenApi
   , _openApiServers :: [Server]
 
     -- | The available paths and operations for the API.
-  , _openApiPaths :: InsOrdHashMap FilePath PathItem
+  , _openApiPaths :: HashMap FilePath PathItem
 
     -- | An element to hold various schemas for the specification.
   , _openApiComponents :: Components
@@ -115,7 +113,7 @@ data OpenApi = OpenApi
     -- Not all tags that are used by the 'Operation' Object must be declared.
     -- The tags that are not declared MAY be organized randomly or based on the tools' logic.
     -- Each tag name in the list MUST be unique.
-  , _openApiTags :: InsOrdHashSet Tag
+  , _openApiTags :: HashSet Tag
 
     -- | Additional external documentation.
   , _openApiExternalDocs :: Maybe ExternalDocs
@@ -184,13 +182,13 @@ data Server = Server
 
     -- | A map between a variable name and its value.
     -- The value is used for substitution in the server's URL template.
-  , _serverVariables :: InsOrdHashMap Text ServerVariable
+  , _serverVariables :: HashMap Text ServerVariable
   } deriving (Eq, Show, Generic, Data, Typeable)
 
 data ServerVariable = ServerVariable
   { -- | An enumeration of string values to be used if the substitution options
     -- are from a limited set. The array SHOULD NOT be empty.
-    _serverVariableEnum :: Maybe (InsOrdHashSet Text) -- TODO NonEmpty
+    _serverVariableEnum :: Maybe (HashSet Text) -- TODO NonEmpty
 
     -- | The default value to use for substitution, which SHALL be sent if an alternate value
     -- is not supplied. Note this behavior is different than the 'Schema\ Object's treatment
@@ -271,7 +269,7 @@ data PathItem = PathItem
 data Operation = Operation
   { -- | A list of tags for API documentation control.
     -- Tags can be used for logical grouping of operations by resources or any other qualifier.
-    _operationTags :: InsOrdHashSet TagName
+    _operationTags :: HashSet TagName
 
     -- | A short summary of what the operation does.
     -- For maximum readability in the swagger-ui, this field SHOULD be less than 120 characters.
@@ -312,7 +310,7 @@ data Operation = Operation
     -- The key is a unique identifier for the 'Callback' Object.
     -- Each value in the map is a 'Callback' Object that describes a request
     -- that may be initiated by the API provider and the expected responses.
-  , _operationCallbacks :: InsOrdHashMap Text (Referenced Callback)
+  , _operationCallbacks :: HashMap Text (Referenced Callback)
 
     -- | Declares this operation to be deprecated.
     -- Usage of the declared operation should be refrained.
@@ -360,7 +358,7 @@ data RequestBody = RequestBody
     -- The key is a media type or media type range and the value describes it.
     -- For requests that match multiple keys, only the most specific key is applicable.
     -- e.g. @text/plain@ overrides @text/\*@
-  , _requestBodyContent :: InsOrdHashMap MediaType MediaTypeObject
+  , _requestBodyContent :: HashMap MediaType MediaTypeObject
 
     -- | Determines if the request body is required in the request.
     -- Defaults to 'False'.
@@ -377,13 +375,13 @@ data MediaTypeObject = MediaTypeObject
 
     -- | Examples of the media type.
     -- Each example object SHOULD match the media type and specified schema if present.
-  , _mediaTypeObjectExamples :: InsOrdHashMap Text (Referenced Example)
+  , _mediaTypeObjectExamples :: HashMap Text (Referenced Example)
 
     -- | A map between a property name and its encoding information.
     -- The key, being the property name, MUST exist in the schema as a property.
     -- The encoding object SHALL only apply to 'RequestBody' objects when the media type
     -- is @multipart@ or @application/x-www-form-urlencoded@.
-  , _mediaTypeObjectEncoding :: InsOrdHashMap Text Encoding
+  , _mediaTypeObjectEncoding :: HashMap Text Encoding
   } deriving (Eq, Show, Generic, Data, Typeable)
 
 -- | In order to support common ways of serializing simple parameters, a set of style values are defined.
@@ -423,7 +421,7 @@ data Encoding = Encoding
     -- for example @Content-Disposition@. @Content-Type@ is described separately
     -- and SHALL be ignored in this section.
     -- This property SHALL be ignored if the request body media type is not a @multipart@.
-  , _encodingHeaders :: InsOrdHashMap Text (Referenced Header)
+  , _encodingHeaders :: HashMap Text (Referenced Header)
 
     -- | Describes how a specific property value will be serialized depending on its type.
     -- See 'Param' Object for details on the style property.
@@ -530,10 +528,10 @@ data Param = Param
     -- in the parameter encoding. The '_paramExamples' field is mutually exclusive of the '_paramExample' field.
     -- Furthermore, if referencing a schema that contains an example,
     -- the examples value SHALL override the example provided by the schema.
-  , _paramExamples :: InsOrdHashMap Text (Referenced Example)
+  , _paramExamples :: HashMap Text (Referenced Example)
 
     -- TODO
-    -- _paramContent :: InsOrdHashMap MediaType MediaTypeObject
+    -- _paramContent :: HashMap MediaType MediaTypeObject
     -- should be singleton. mutually exclusive with _paramSchema.
   } deriving (Eq, Show, Generic, Data, Typeable)
 
@@ -583,7 +581,7 @@ data Link = Link
     -- the value can be a constant or an expression to be evaluated and passed to the linked operation.
     -- The parameter name can be qualified using the parameter location @[{in}.]{name}@
     -- for operations that use the same parameter name in different locations (e.g. path.id).
-  , _linkParameters :: InsOrdHashMap Text ExpressionOrValue
+  , _linkParameters :: HashMap Text ExpressionOrValue
 
     -- | A literal value or @{expression}@ to use as a request body when calling the target operation.
   , _linkRequestBody :: Maybe ExpressionOrValue
@@ -646,7 +644,7 @@ data Schema = Schema
   , _schemaOneOf :: Maybe [Referenced Schema]
   , _schemaNot :: Maybe (Referenced Schema)
   , _schemaAnyOf :: Maybe [Referenced Schema]
-  , _schemaProperties :: InsOrdHashMap Text (Referenced Schema)
+  , _schemaProperties :: HashMap Text (Referenced Schema)
   , _schemaAdditionalProperties :: Maybe AdditionalProperties
 
   , _schemaDiscriminator :: Maybe Discriminator
@@ -803,7 +801,7 @@ data Discriminator = Discriminator
     _discriminatorPropertyName :: Text
 
     -- | An object to hold mappings between payload values and schema names or references.
-  , _discriminatorMapping :: InsOrdHashMap Text Text
+  , _discriminatorMapping :: HashMap Text Text
   } deriving (Eq, Show, Generic, Data, Typeable)
 
 -- | A @'Schema'@ with an optional name.
@@ -853,7 +851,7 @@ data Responses = Responses
 
     -- | Any HTTP status code can be used as the property name (one property per HTTP status code).
     -- Describes the expected response for those HTTP status codes.
-  , _responsesResponses :: InsOrdHashMap HttpStatusCode (Referenced Response)
+  , _responsesResponses :: HashMap HttpStatusCode (Referenced Response)
   } deriving (Eq, Show, Generic, Data, Typeable)
 
 type HttpStatusCode = Int
@@ -868,15 +866,15 @@ data Response = Response
     -- The key is a media type or media type range and the value describes it.
     -- For responses that match multiple keys, only the most specific key is applicable.
     -- e.g. @text/plain@ overrides @text/\*@.
-  , _responseContent :: InsOrdHashMap MediaType MediaTypeObject
+  , _responseContent :: HashMap MediaType MediaTypeObject
 
     -- | Maps a header name to its definition.
-  , _responseHeaders :: InsOrdHashMap HeaderName (Referenced Header)
+  , _responseHeaders :: HashMap HeaderName (Referenced Header)
 
     -- | A map of operations links that can be followed from the response.
     -- The key of the map is a short name for the link, following the naming
     -- constraints of the names for 'Component' Objects.
-  , _responseLinks :: InsOrdHashMap Text (Referenced Link)
+  , _responseLinks :: HashMap Text (Referenced Link)
   } deriving (Eq, Show, Generic, Data, Typeable)
 
 instance IsString Response where
@@ -887,7 +885,7 @@ instance IsString Response where
 -- may be initiated by the API provider and the expected responses.
 -- The key value used to identify the path item object is an expression, evaluated at runtime,
 -- that identifies a URL to use for the callback operation.
-newtype Callback = Callback (InsOrdHashMap Text PathItem)
+newtype Callback = Callback (HashMap Text PathItem)
   deriving (Eq, Show, Generic, Data, Typeable)
 
 type HeaderName = Text
@@ -904,7 +902,7 @@ data Header = Header
   , _headerAllowEmptyValue :: Maybe Bool
   , _headerExplode :: Maybe Bool
   , _headerExample :: Maybe Value
-  , _headerExamples :: InsOrdHashMap Text (Referenced Example)
+  , _headerExamples :: HashMap Text (Referenced Example)
 
   , _headerSchema :: Maybe (Referenced Schema)
   } deriving (Eq, Show, Generic, Data, Typeable)
@@ -956,7 +954,7 @@ data OAuth2Flow p = OAuth2Flow
     -- | The available scopes for the OAuth2 security scheme.
     -- A map between the scope name and a short description for it.
     -- The map MAY be empty.
-  , _oAuth2Scopes :: InsOrdHashMap Text Text
+  , _oAuth2Scopes :: HashMap Text Text
   } deriving (Eq, Show, Generic, Data, Typeable)
 
 data OAuth2Flows = OAuth2Flows
@@ -1038,7 +1036,7 @@ newtype SecurityDefinitions
 -- The object can have multiple security schemes declared in it which are all required
 -- (that is, there is a logical AND between the schemes).
 newtype SecurityRequirement = SecurityRequirement
-  { getSecurityRequirement :: InsOrdHashMap Text [Text]
+  { getSecurityRequirement :: HashMap Text [Text]
   } deriving (Eq, Read, Show, Semigroup, Monoid, ToJSON, FromJSON, Data, Typeable)
 
 -- | Tag name.
@@ -1152,7 +1150,7 @@ instance At   Operation where at n = responses . at n
 
 dereference :: Definitions a -> Referenced a -> a
 dereference _ (Inline a)               = a
-dereference defs (Ref (Reference ref)) = fromJust $ InsOrdHashMap.lookup ref defs
+dereference defs (Ref (Reference ref)) = fromJust $ HashMap.lookup ref defs
 
 -- | Validate JSON @'Value'@ against Swagger @'Schema'@.
 --
@@ -1287,7 +1285,7 @@ sub_ = lmap . view
 -- | Validate value against a schema given schema reference and validation function.
 withRef :: Reference -> (Schema -> Validation s a) -> Validation s a
 withRef (Reference ref) f = withConfig $ \cfg ->
-  case InsOrdHashMap.lookup ref (configDefinitions cfg) of
+  case HashMap.lookup ref (configDefinitions cfg) of
     Nothing -> invalid $ "unknown schema " ++ show ref
     Just s  -> f s
 
@@ -1378,7 +1376,7 @@ validateArray xs = do
       invalid ("array is expected to contain unique items, but it does not")
   where
     len = Vector.length xs
-    allUnique = len == InsOrdHashSet.size (InsOrdHashSet.fromList (Vector.toList xs))
+    allUnique = len == HashSet.size (HashSet.fromList (Vector.toList xs))
 
 validateObject ::
 #if MIN_VERSION_aeson(2,0,0)
@@ -1391,7 +1389,7 @@ validateObject o = withSchema $ \sch ->
   case sch ^. discriminator of
     Just (Discriminator pname types) -> case fromJSON <$> lookupKey pname o of
       Just (JSON.Success pvalue) ->
-        let ref = fromMaybe pvalue $ InsOrdHashMap.lookup pvalue types
+        let ref = fromMaybe pvalue $ HashMap.lookup pvalue types
         -- TODO ref may be name or reference
         in validateWithSchemaRef (Ref (Reference ref)) (Object o)
       Just (JSON.Error msg)   -> invalid ("failed to parse discriminator property " ++ show pname ++ ": " ++ show msg)
@@ -1420,7 +1418,7 @@ validateObject o = withSchema $ \sch ->
         case v of
           Null | not (k `elem` (sch ^. required)) -> valid  -- null is fine for non-required property
           _ ->
-            case InsOrdHashMap.lookup k (sch ^. properties) of
+            case HashMap.lookup k (sch ^. properties) of
               Nothing -> checkMissing (unknownProperty k) additionalProperties $ validateAdditional k v
               Just s  -> validateWithSchemaRef s v
 
