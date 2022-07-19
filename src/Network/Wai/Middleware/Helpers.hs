@@ -8,9 +8,9 @@ import Language.Haskell.TH   (mkName)
 import           Data.Aeson        (Key)
 import qualified Data.Aeson.Key    as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import           Data.Bifunctor             (first)
-#endif
+#else
 import qualified Data.HashMap.Strict as HM
+#endif
 import qualified Data.Text                  as T
 
 swaggerFieldRules :: LensRules

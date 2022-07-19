@@ -1628,21 +1628,34 @@ instance (Eq p, FromJSON p) => FromJSON (OAuth2Flow p) where
 instance FromJSON OAuth2Flows where
   parseJSON = pure undefined
 
-instance FromJSON SecuritySchemeType where
-  parseJSON js@(Object o) = do
-    (t :: Text) <- o .: "type"
-    case t of
-      "http"   -> do
-          scheme <-  o .: "scheme"
-          SecuritySchemeHttp <$> case scheme of
-              "bearer" -> HttpSchemeBearer <$> (o .:! "bearerFormat")
-              "basic" -> pure HttpSchemeBasic
-              t -> pure $ HttpSchemeCustom t
-      "apiKey" -> SecuritySchemeApiKey <$> parseJSON js
-      "oauth2" -> SecuritySchemeOAuth2 <$> (o .: "flows")
-      "openIdConnect" -> SecuritySchemeOpenIdConnect <$> (o .: "openIdConnectUrl")
-      _ -> empty
+instance FromJSON Reference where
+  parseJSON (Object o) = Reference <$> o .: "$ref"
   parseJSON _ = empty
+
+referencedParseJSON :: FromJSON a => Text -> Value -> JSON.Parser (Referenced a)
+referencedParseJSON pref js@(Object o) = do
+  ms <- o .:? "$ref"
+  case ms of
+    Nothing -> Inline <$> parseJSON js
+    Just s  -> Ref <$> parseRef s
+  where
+    parseRef s = do
+      case Text.stripPrefix pref s of
+        Nothing     -> fail $ "expected $ref of the form \"" <> Text.unpack pref <> "*\", but got " <> show s
+        Just suffix -> pure (Reference suffix)
+referencedParseJSON _ _ = fail "referenceParseJSON: not an object"
+
+instance FromJSON AdditionalProperties where
+  parseJSON (Bool b) = pure $ AdditionalPropertiesAllowed b
+  parseJSON js = AdditionalPropertiesSchema <$> parseJSON js
+
+-- | All strings are parsed as expressions
+instance FromJSON ExpressionOrValue where
+  parseJSON (String expr) = pure $ Expression expr
+  parseJSON v = pure $ Value v
+
+instance FromJSON Xml where
+  parseJSON = genericParseJSON (jsonPrefix "xml")
 
 instance FromJSON OpenApiItems where
   parseJSON js@(Object obj)
@@ -1650,43 +1663,6 @@ instance FromJSON OpenApiItems where
       | otherwise = OpenApiItemsObject <$> parseJSON js
   parseJSON js@(Array _)  = OpenApiItemsArray  <$> parseJSON js
   parseJSON _ = empty
-
-instance FromJSON MimeList where
-  parseJSON js = MimeList . map fromString <$> parseJSON js
-
-instance FromJSON Responses where
-  parseJSON (Object o) = Responses
-    <$> o .:? "default"
-    <*> parseJSON (Object (deleteKey "default" o))
-  parseJSON _ = empty
-
-instance FromJSON SecurityDefinitions where
-  parseJSON js = SecurityDefinitions <$> parseJSON js
-
-instance FromJSON OpenApi where
-    parseJSON = withObject "OpenApi" $ \o -> OpenApi
-        <$> o .: "info"
-        <*> o .:? "servers" .!= mempty
-        <*> o .: "paths"
-        <*> o .: "components"
-        <*> o .:? "security" .!= mempty
-        <*> o .:? "tags" .!= mempty
-        <*> o .:? "externalDocs"
-
-instance FromJSON Operation where
-    parseJSON = withObject "Operation" $ \o -> Operation
-        <$> o .:? "tags" .!= mempty
-        <*> o .:? "summary"
-        <*> o .:? "description"
-        <*> o .:? "externalDocs"
-        <*> o .:? "id"
-        <*> o .:? "parameters" .!= mempty
-        <*> o .:? "requestBody"
-        <*> o .: "responses"
-        <*> o .:? "callbacks" .!= mempty
-        <*> o .:? "deprecated"
-        <*> o .:? "security" .!= mempty
-        <*> o .:? "servers" .!= mempty
 
 instance FromJSON Schema where
     parseJSON = withObject "Schema" $ \o -> Schema
@@ -1730,6 +1706,48 @@ instance FromJSON Schema where
         <*> o .:? "enum"
         <*> o .:? "multipleOf"
 
+instance FromJSON (Referenced Schema)   where parseJSON = referencedParseJSON "#/components/schemas/"
+
+
+deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_example" :: String)) } ''Example
+instance FromJSON (Referenced Example)  where parseJSON = referencedParseJSON "#/components/examples/"
+
+instance FromJSON SecuritySchemeType where
+  parseJSON js@(Object o) = do
+    (t :: Text) <- o .: "type"
+    case t of
+      "http"   -> do
+          scheme <-  o .: "scheme"
+          SecuritySchemeHttp <$> case scheme of
+              "bearer" -> HttpSchemeBearer <$> (o .:! "bearerFormat")
+              "basic" -> pure HttpSchemeBasic
+              _ -> pure $ HttpSchemeCustom scheme
+      "apiKey" -> SecuritySchemeApiKey <$> parseJSON js
+      "oauth2" -> SecuritySchemeOAuth2 <$> (o .: "flows")
+      "openIdConnect" -> SecuritySchemeOpenIdConnect <$> (o .: "openIdConnectUrl")
+      _ -> empty
+  parseJSON _ = empty
+
+deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_securityScheme" :: String)) } ''SecurityScheme
+
+instance FromJSON MimeList where
+  parseJSON js = MimeList . map fromString <$> parseJSON js
+
+instance FromJSON Header where
+    parseJSON = withObject "Header" $ \o -> Header
+        <$> o .:? "description"
+        <*> o .:? "required"
+        <*> o .:? "deprecated"
+        <*> o .:? "allowEmptyValue"
+        <*> o .:? "explode"
+        <*> o .:? "example"
+        <*> o .:? "examples" .!= mempty
+        <*> o .:? "schema"
+instance FromJSON (Referenced Header)   where parseJSON = referencedParseJSON "#/components/headers/"
+
+deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_encoding" :: String)) } ''Encoding
+
+
 instance FromJSON MediaTypeObject where
     parseJSON = withObject "MediaTypeObject" $ \o -> MediaTypeObject
         <$> o .:? "schema"
@@ -1737,12 +1755,44 @@ instance FromJSON MediaTypeObject where
         <*> o .:? "examples" .!= mempty
         <*> o .:? "encoding" .!= mempty
 
+instance FromJSON Server where
+    parseJSON = withObject "Server" $ \o -> Server
+        <$> o .: "url"
+        <*> o .:? "description"
+        <*> o .:? "variables" .!= mempty
+
+deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_link" :: String)) } ''Link
+instance FromJSON (Referenced Link)     where parseJSON = referencedParseJSON "#/components/links/"
+
 instance FromJSON Response where
     parseJSON = withObject "Response" $ \o -> Response
         <$> o .: "description"
         <*> o .:? "content" .!= mempty
         <*> o .:? "headers" .!= mempty
         <*> o .:? "links" .!= mempty
+
+instance FromJSON (Referenced Response) where parseJSON = referencedParseJSON "#/components/responses/"
+
+instance FromJSON Responses where
+  parseJSON (Object o) = Responses
+    <$> o .:? "default"
+    <*> parseJSON (Object (deleteKey "default" o))
+  parseJSON _ = empty
+
+instance FromJSON SecurityDefinitions where
+  parseJSON js = SecurityDefinitions <$> parseJSON js
+
+deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_requestBody" :: String)) } ''RequestBody
+
+instance FromJSON OpenApi where
+    parseJSON = withObject "OpenApi" $ \o -> OpenApi
+        <$> o .: "info"
+        <*> o .:? "servers" .!= mempty
+        <*> o .: "paths"
+        <*> o .: "components"
+        <*> o .:? "security" .!= mempty
+        <*> o .:? "tags" .!= mempty
+        <*> o .:? "externalDocs"
 
 instance FromJSON PathItem where
     parseJSON = withObject "PathItem" $ \o -> PathItem
@@ -1759,6 +1809,33 @@ instance FromJSON PathItem where
         <*> o .:? "servers" .!= mempty
         <*> o .:? "parameters" .!= mempty
 
+instance FromJSON Operation where
+    parseJSON = withObject "Operation" $ \o -> Operation
+        <$> o .:? "tags" .!= mempty
+        <*> o .:? "summary"
+        <*> o .:? "description"
+        <*> o .:? "externalDocs"
+        <*> o .:? "id"
+        <*> o .:? "parameters" .!= mempty
+        <*> o .:? "requestBody"
+        <*> o .: "responses"
+        <*> o .:? "callbacks" .!= mempty
+        <*> o .:? "deprecated"
+        <*> o .:? "security" .!= mempty
+        <*> o .:? "servers" .!= mempty
+
+instance FromJSON Components where
+    parseJSON = withObject "Components" $ \o -> Components
+        <$> o .:? "schemas" .!= mempty
+        <*> o .:? "responses" .!= mempty
+        <*> o .:? "parameters" .!= mempty
+        <*> o .:? "examples" .!= mempty
+        <*> o .:? "requestBodies" .!= mempty
+        <*> o .:? "headers" .!= mempty
+        <*> o .:? "securitySchemes" .!= SecurityDefinitions mempty
+        <*> o .:? "links" .!= mempty
+        <*> o .:? "callbacks" .!= mempty
+
 instance FromJSON Param where
     parseJSON = withObject "Param" $ \o -> Param
         <$> o .: "name"
@@ -1774,80 +1851,10 @@ instance FromJSON Param where
         <*> o .:? "example"
         <*> o .:? "examples" .!= mempty
 
-instance FromJSON Components where
-    parseJSON = withObject "Components" $ \o -> Components
-        <$> o .:? "schemas" .!= mempty
-        <*> o .:? "responses" .!= mempty
-        <*> o .:? "parameters" .!= mempty
-        <*> o .:? "examples" .!= mempty
-        <*> o .:? "requestBodies" .!= mempty
-        <*> o .:? "headers" .!= mempty
-        <*> o .:? "securitySchemes" .!= SecurityDefinitions mempty
-        <*> o .:? "links" .!= mempty
-        <*> o .:? "callbacks" .!= mempty
-
-instance FromJSON Server where
-    parseJSON = withObject "Server" $ \o -> Server
-        <$> o .: "url"
-        <*> o .:? "description"
-        <*> o .:? "variables" .!= mempty
-
-instance FromJSON Header where
-    parseJSON = withObject "Header" $ \o -> Header
-        <$> o .:? "description"
-        <*> o .:? "required"
-        <*> o .:? "deprecated"
-        <*> o .:? "allowEmptyValue"
-        <*> o .:? "explode"
-        <*> o .:? "example"
-        <*> o .:? "examples" .!= mempty
-        <*> o .:? "schema"
-
-fold <$> sequence
-    [ deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_securityScheme" :: String)) } ''SecurityScheme
-    , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_example" :: String)) } ''Example
-    , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_requestBody" :: String)) } ''RequestBody
-    , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_link" :: String)) } ''Link
-    , deriveFromJSON defaultOptions { fieldLabelModifier = over _head toLower . drop (length ("_encoding" :: String)) } ''Encoding
-    ]
-
-instance FromJSON Reference where
-  parseJSON (Object o) = Reference <$> o .: "$ref"
-  parseJSON _ = empty
-
-referencedParseJSON :: FromJSON a => Text -> Value -> JSON.Parser (Referenced a)
-referencedParseJSON prefix js@(Object o) = do
-  ms <- o .:? "$ref"
-  case ms of
-    Nothing -> Inline <$> parseJSON js
-    Just s  -> Ref <$> parseRef s
-  where
-    parseRef s = do
-      case Text.stripPrefix prefix s of
-        Nothing     -> fail $ "expected $ref of the form \"" <> Text.unpack prefix <> "*\", but got " <> show s
-        Just suffix -> pure (Reference suffix)
-referencedParseJSON _ _ = fail "referenceParseJSON: not an object"
-
-instance FromJSON (Referenced Schema)   where parseJSON = referencedParseJSON "#/components/schemas/"
 instance FromJSON (Referenced Param)    where parseJSON = referencedParseJSON "#/components/parameters/"
-instance FromJSON (Referenced Response) where parseJSON = referencedParseJSON "#/components/responses/"
 instance FromJSON (Referenced RequestBody) where parseJSON = referencedParseJSON "#/components/requestBodies/"
-instance FromJSON (Referenced Example)  where parseJSON = referencedParseJSON "#/components/examples/"
-instance FromJSON (Referenced Header)   where parseJSON = referencedParseJSON "#/components/headers/"
-instance FromJSON (Referenced Link)     where parseJSON = referencedParseJSON "#/components/links/"
+
 instance FromJSON (Referenced Callback) where parseJSON = referencedParseJSON "#/components/callbacks/"
-
-instance FromJSON Xml where
-  parseJSON = genericParseJSON (jsonPrefix "xml")
-
-instance FromJSON AdditionalProperties where
-  parseJSON (Bool b) = pure $ AdditionalPropertiesAllowed b
-  parseJSON js = AdditionalPropertiesSchema <$> parseJSON js
-
--- | All strings are parsed as expressions
-instance FromJSON ExpressionOrValue where
-  parseJSON (String expr) = pure $ Expression expr
-  parseJSON v = pure $ Value v
 
 instance FromJSON Callback where
   parseJSON = fmap Callback . parseJSON
