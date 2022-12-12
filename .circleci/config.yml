@@ -1,0 +1,15 @@
+version: 2.1
+
+workflows:
+  version: 2
+  integration:
+    jobs:
+      - test
+
+jobs:
+  test:
+    docker:
+      - image: kyotsuya/wai-middleware-validation-test:lts-16.31
+    steps:
+      - checkout
+      - run: stack test
