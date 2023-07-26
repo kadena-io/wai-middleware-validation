@@ -34,6 +34,7 @@ import Control.Lens hiding ((.=), lazy)
 import qualified Control.Lens.Unsound as Unsound
 import Control.Monad
 import Control.Monad.Except
+import Control.Monad.IO.Class
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import Data.Align
@@ -163,7 +164,7 @@ insertPathMap :: PathMap -> FilePath -> PathMap
 insertPathMap pm path = go (splitDirectories path) pm
   where
     go [] this = case _pathHere this of
-        Nothing -> this { _pathHere = Just path }
+        Nothing -> this & pathHere ?~ path
         Just path' -> error $ "path conflict between " <> path <> " and " <> path'
     go (p:ps) this
         | not (null p) && head p == '{' && last p == '}'
